@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      ローカル開発用（非サンドボックス）。
+      audio-input はサンドボックス用エンタイトルメントで、非サンドボックス時は無害。
+      将来 Mac App Store 以外へ配布する際は app-sandbox は付けず Developer ID + 公証を行う。
+    -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>
