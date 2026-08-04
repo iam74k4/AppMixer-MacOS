@@ -34,6 +34,20 @@ enum CoreAudioObject {
         return value
     }
 
+    /// プロパティが存在するか。
+    static func hasProperty(
+        _ objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal
+    ) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        return AudioObjectHasProperty(objectID, &address)
+    }
+
     /// CFString プロパティを String として読む。
     static func readString(
         _ objectID: AudioObjectID,

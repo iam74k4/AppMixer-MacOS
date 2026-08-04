@@ -1,8 +1,16 @@
 import SwiftUI
+import Combine
 
 struct ContentView: View {
 
     @ObservedObject var model: MixerModel
+
+    // ビューが表示されている間だけ動くタイマー。onAppear/onDisappear は
+    // MenuBarExtra(.window) では期待どおりに来ないことがあるため、
+    // 表示に紐づくこちらでメーター更新を駆動する。
+    // @State で保持する。let にすると body 再評価のたびに作り直され、
+    // カウントダウンが振り出しに戻って更新間隔が乱れる。
+    @State private var ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,9 +30,10 @@ struct ContentView: View {
             Divider()
             footer
         }
-        .frame(width: 340)
+        .frame(width: 420)
         .onAppear { model.onAppear() }
         .onDisappear { model.onDisappear() }
+        .onReceive(ticker) { _ in model.tick() }
     }
 
     // MARK: - Header
@@ -147,7 +156,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 360)
+                .frame(maxHeight: 460)
             }
         }
     }

@@ -61,7 +61,6 @@ final class ProcessTap {
     private var tapID: AudioObjectID = .unknown
     private var aggregateID: AudioObjectID = .unknown
     private var deviceProcID: AudioDeviceIOProcID?
-    private let ioQueue = DispatchQueue(label: "com.appmixer.ioproc")
 
     init(processObjectIDs: [AudioObjectID]) {
         self.processObjectIDs = processObjectIDs
@@ -155,7 +154,10 @@ final class ProcessTap {
         let ioBlock: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, _ in
             ProcessTap.render(input: inInputData, output: outOutputData, state: state)
         }
-        let procStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, ioQueue, ioBlock)
+        // キューを渡すと通常優先度のキュー上でレンダリングされ、負荷時に
+        // バッファを落とす。nil を渡してデバイスの IO スレッドで動かす。
+        // render は確保もロックも行わないためリアルタイムスレッドで安全。
+        let procStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, nil, ioBlock)
         guard procStatus == noErr, let procID else {
             invalidate()
             throw TapError.ioProcCreationFailed(procStatus)

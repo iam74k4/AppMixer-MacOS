@@ -34,17 +34,26 @@ final class MixerModel: ObservableObject {
 
     private let controller = MixerController()
     private let defaults = UserDefaults.standard
-    private var meterTimer: Timer?
     private var terminationObserver: NSObjectProtocol?
     /// 自分の書き込みによるリスナー反射を無視する期限。
     private var suppressMasterSyncUntil: Date?
     /// プロセス一覧はまとまって変化するため、少し待ってから一度だけ同期する。
     private var processResyncWorkItem: DispatchWorkItem?
+    /// マスター音量のポーリング頻度を落とすためのカウンタ。
+    private var meterTick: UInt64 = 0
+    /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
+    private var lastTick: Date?
+    private var idleWatchdog: Timer?
+    /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
+    private var meteringFailures: [String: Int] = [:]
+    private static let meteringRetryLimit = 2
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
+        // 値だけを読み直す軽い経路にする。対応可否やデバイス名の再取得まで
+        // 走らせると、キーリピート中に HAL 呼び出しが大量に発生する。
         controller.onMasterChanged = { [weak self] in
-            MainActor.assumeIsolated { self?.refreshMaster() }
+            MainActor.assumeIsolated { self?.syncMasterValues() }
         }
 
         // 音声プロセスの増減に追従する。ポップオーバーを開いていなくても、
@@ -62,9 +71,12 @@ final class MixerModel: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.controller.shutdown() }
         }
+
+        startIdleWatchdog()
     }
 
     deinit {
+        idleWatchdog?.invalidate()
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
@@ -84,26 +96,62 @@ final class MixerModel: ObservableObject {
     // MARK: - Lifecycle (popover open/close)
 
     func onAppear() {
+        // 解放中に開き直されたら中断する。
+        controller.cancelMeteringRelease()
+        meteringFailures.removeAll()
         refresh()
-        meterTimer?.invalidate()
-        // .common モードで登録する。既定の .default だけだと、スライダー操作中
-        // （ランループが .eventTracking になる）にメーターが止まってしまう。
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickMeters() }
+    }
+
+    /// 表示中に一定間隔で呼ばれる（駆動はビュー側のタイマー）。
+    func tick() {
+        lastTick = Date()
+        tickMeters()
+    }
+
+    /// 表示が終わったのに onDisappear が来ないことがあるため、
+    /// tick が途絶えたら（＝閉じられたら）メーター用タップを解放する。
+    private func startIdleWatchdog() {
+        let timer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.releaseMetersIfIdle() }
         }
+        // 常駐アプリなので、他のウェイクアップとまとめてもらう。
+        timer.tolerance = 1.5
         RunLoop.main.add(timer, forMode: .common)
-        meterTimer = timer
+        idleWatchdog = timer
+    }
+
+    private func releaseMetersIfIdle() {
+        guard let lastTick, Date().timeIntervalSince(lastTick) > 2.0 else { return }
+        // 「閉じられた」のか「メインスレッドが詰まっていただけ」なのかを
+        // ここでは区別できない。一拍おいて、それでも更新が来ていなければ解放する。
+        // 詰まりで毎回壊すと、集約デバイスの生成破棄を繰り返して音飛びする。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self,
+                  let lastTick = self.lastTick,
+                  Date().timeIntervalSince(lastTick) > 2.0 else { return }
+            self.lastTick = nil
+            self.controller.releaseMeteringOnlyTaps()
+        }
     }
 
     func onDisappear() {
-        meterTimer?.invalidate()
-        meterTimer = nil
+        // 表示していない間は、メーター用に張っただけのタップを解放する。
+        // 音量を変えたアプリのタップはそのまま維持する。
+        controller.releaseMeteringOnlyTaps()
+        for index in apps.indices {
+            apps[index].metered = controller.hasTap(forID: apps[index].id)
+        }
     }
 
     // MARK: - Refresh
 
     func refresh() {
-        let enumerated = AudioAppEnumerator.enumerate()
+        refresh(with: AudioAppEnumerator.enumerate())
+    }
+
+    private func refresh(with enumerated: [AudioApp]) {
+        // 反映に失敗している行の印は引き継ぐ（作り直すたびに消さない）。
+        let previouslyFailed = Set(apps.filter(\.failed).map(\.id))
 
         // 新規アプリは永続化した設定を復元する。
         // 再生中のものだけに絞る。停止中のアプリまで一斉にタップを張ると、
@@ -126,12 +174,71 @@ final class MixerModel: ObservableObject {
                 volume: state.volume,
                 muted: state.muted,
                 level: controller.level(forID: app.id),
-                metered: controller.hasTap(forID: app.id)
+                metered: controller.hasFreshTap(for: app),
+                failed: previouslyFailed.contains(app.id)
             )
         }
 
         refreshMaster()
         permission = AudioCapturePermission.current()
+    }
+
+    /// メーターがまだ出ていない再生中のアプリを 1 つだけ拾ってタップを張る。
+    private func attachNextMeteringTap() {
+        // 権限状態では判定しない。TCC の状態取得は環境によって
+        // .notDetermined のままになることがあり、そこで弾くと
+        // 実際には許可されていてもメーターが永久に出なくなる。
+        // 張れなければ activate() が失敗するだけなので、まず試す。
+        // タップを張れないアプリ（システムプロセス等）で延々と再試行して
+        // 後続のアプリにメーターが付かなくなるのを防ぐため、
+        // 失敗が続いたものは対象から外す。
+        // 見えている行だけを対象にする。検索で絞り込んでいるのに
+        // 画面外のアプリぶんまで集約デバイスを作らない。
+        let visible = Set(filteredApps.map(\.id))
+        guard let index = apps.firstIndex(where: {
+            visible.contains($0.id) && $0.app.isRunningOutput
+                && !controller.hasFreshTap(for: $0.app)
+                && (meteringFailures[$0.id] ?? 0) < Self.meteringRetryLimit
+        }) else {
+            return
+        }
+        let app = apps[index].app
+        let ok = controller.ensureMeteringTap(for: app)
+        if ok {
+            meteringFailures[app.id] = nil
+        } else {
+            meteringFailures[app.id, default: 0] += 1
+        }
+        apps[index].metered = controller.hasTap(forID: app.id)
+        // 失敗しても音量設定そのものが効いていないとは限らないので、
+        // 既に失敗表示が無い行にだけ印を付ける。
+        if !ok && !apps[index].failed && apps[index].volume < 0.999 {
+            apps[index].failed = true
+        }
+    }
+
+    /// 一覧の顔ぶれや再生状態が変わったときだけ作り直す。
+    /// 毎秒まるごと差し替えると、操作中のスライダーが揺れてしまう。
+    private func refreshAppsIfChanged() {
+        // 列挙は 1 回だけ。判定と作り直しで二重に走らせない。
+        let enumerated = AudioAppEnumerator.enumerate()
+        let current = apps.map { AppFingerprint($0.app) }
+        let latest = enumerated.map { AppFingerprint($0) }
+        guard current != latest else { return }
+        refresh(with: enumerated)
+    }
+
+    /// 一覧を作り直すべきかの判定に使う指紋。
+    private struct AppFingerprint: Equatable {
+        let id: String
+        let running: Bool
+        let processObjectIDs: Set<AudioObjectID>
+
+        init(_ app: AudioApp) {
+            id = app.id
+            running = app.isRunningOutput
+            processObjectIDs = Set(app.processObjectIDs)
+        }
     }
 
     /// プロセス一覧の変化をまとめて処理する（連続通知を 1 回に束ねる）。
@@ -144,20 +251,48 @@ final class MixerModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
-    /// マスター音量まわりだけを読み直す（外部変更の反映用）。
+    /// マスター音量まわりを読み直す（対応可否やデバイス名も含む重い経路）。
     func refreshMaster() {
-        masterSupported = controller.masterVolumeSupported
-        masterMuteSupported = controller.masterMuteSupported
-        outputName = controller.defaultOutputName()
+        // 変化したときだけ書き込む。毎回代入すると画面全体が再描画される。
+        let supported = controller.masterVolumeSupported
+        if masterSupported != supported { masterSupported = supported }
+        let muteSupported = controller.masterMuteSupported
+        if masterMuteSupported != muteSupported { masterMuteSupported = muteSupported }
+        let name = controller.defaultOutputName()
+        if outputName != name { outputName = name }
+        syncMasterValues()
+    }
 
+    /// 音量とミュートの現在値だけを読み直す（ポーリング/通知用の軽い経路）。
+    private func syncMasterValues() {
         // 自分で書いた直後は、その反射を無視して操作中の値を保つ。
-        if let until = suppressMasterSyncUntil, Date() < until { return }
-        suppressMasterSyncUntil = nil
-        masterVolume = controller.masterVolume()
-        masterMuted = controller.masterMuted()
+        if let until = suppressMasterSyncUntil {
+            if Date() < until { return }
+            suppressMasterSyncUntil = nil
+        }
+        let volume = controller.masterVolume()
+        let muted = controller.masterMuted()
+        // 変化したときだけ書き込み、無駄な再描画を避ける。
+        if masterVolume != volume { masterVolume = volume }
+        if masterMuted != muted { masterMuted = muted }
     }
 
     private func tickMeters() {
+        // 表示中は自前で読みに行く。デバイスによってはプロパティ通知が
+        // 届かないことがあり、リスナーだけだと F11/F12 に追従できない。
+        meterTick &+= 1
+        // 重い処理が同じフレームに重ならないよう位相をずらす。
+        if meterTick % 3 == 1 { syncMasterValues() }
+
+        // 表示中はアプリ一覧も定期的に見直す。プロセス一覧は「プロセスの
+        // 生成/破棄」でしか変化しないため、起動済みのアプリが再生を
+        // 始めただけでは通知が来ず、一覧に現れないままになる。
+        if meterTick % 30 == 0 { refreshAppsIfChanged() }
+
+        // 再生中でメーターの出ていないアプリに、順番にタップを張っていく。
+        // 一度に一つだけにして、集約デバイスの一斉生成による音飛びを避ける。
+        if meterTick % 15 == 7 { attachNextMeteringTap() }
+
         guard !apps.isEmpty else { return }
         // 変化があったときだけ書き込む。毎フレーム代入すると、全アプリが
         // 無音でも 30fps で画面全体の再描画を起こしてしまう。
@@ -197,7 +332,7 @@ final class MixerModel: ObservableObject {
     func setMasterVolume(_ volume: Float) {
         // 自分の書き込みもリスナーを起こすため、その反射でスライダーが
         // 操作中に跳ねないよう、直後の短い間だけ外部反映を抑制する。
-        suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
+        suppressMasterSyncUntil = Date().addingTimeInterval(0.45)
         if controller.setMasterVolume(volume) {
             masterVolume = volume
         } else {
@@ -208,7 +343,7 @@ final class MixerModel: ObservableObject {
     }
 
     func setMasterMuted(_ muted: Bool) {
-        suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
+        suppressMasterSyncUntil = Date().addingTimeInterval(0.45)
         if controller.setMasterMuted(muted) {
             masterMuted = muted
         } else {
