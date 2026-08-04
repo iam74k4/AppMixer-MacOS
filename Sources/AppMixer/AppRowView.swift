@@ -16,7 +16,12 @@ struct AppRowView: View {
                     Text(app.name)
                         .font(.callout).fontWeight(.medium)
                         .lineLimit(1)
-                    if !app.isRunningOutput {
+                    if display.failed {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help("音量を適用できませんでした。実際の音量は変わっていません。")
+                    } else if !app.isRunningOutput {
                         Text("停止中")
                             .font(.caption2)
                             .foregroundStyle(.secondary)

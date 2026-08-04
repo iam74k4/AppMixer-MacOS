@@ -121,11 +121,33 @@ final class ProcessTap {
 
         var newAggregateID: AudioObjectID = .unknown
         let aggStatus = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
+        // 生成されたデバイスを取りこぼさないよう、guard の前に保持する
+        // （noErr でも ID が無効なケースで invalidate() が後始末できるように）。
+        aggregateID = newAggregateID
         guard aggStatus == noErr, newAggregateID.isValid else {
             invalidate()
             throw TapError.aggregateCreationFailed(aggStatus)
         }
-        aggregateID = newAggregateID
+
+        // 出力側のフォーマットがタップと一致しない場合、単純なバッファコピーでは
+        // 早回し再生やノイズになる。取り違えた音を出すより起動を諦める。
+        let outFormat: AudioStreamBasicDescription = CoreAudioObject.read(
+            aggregateID,
+            selector: kAudioStreamPropertyVirtualFormat,
+            scope: kAudioObjectPropertyScopeOutput,
+            defaultValue: AudioStreamBasicDescription()
+        )
+        if outFormat.mChannelsPerFrame != 0 {
+            let interleavedFlag = kAudioFormatFlagIsNonInterleaved
+            guard outFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+                  outFormat.mBitsPerChannel == 32,
+                  outFormat.mChannelsPerFrame == format.mChannelsPerFrame,
+                  (outFormat.mFormatFlags & interleavedFlag)
+                    == (format.mFormatFlags & interleavedFlag) else {
+                invalidate()
+                throw TapError.unsupportedFormat(outFormat)
+            }
+        }
 
         // 箱を強参照でキャプチャし、IOProc 内で self に触れないようにする。
         let state = self.state
@@ -147,20 +169,36 @@ final class ProcessTap {
         }
     }
 
+    /// タップと集約デバイスを完全に破棄できたか。
+    /// false のままだと対象アプリは .mutedWhenTapped のまま無音になるため、
+    /// 呼び出し側は破棄が終わるまで解放せずに再試行する。
+    var isFullyTornDown: Bool { !tapID.isValid && !aggregateID.isValid }
+
+    /// タップを破棄して対象アプリの音声を通常経路へ戻す。
+    /// デバイス切替中などで HAL が破棄に失敗することがあるため、
+    /// 失敗した ID は保持し、次回の呼び出しで再試行できるようにする。
     func invalidate() {
         if let procID = deviceProcID, aggregateID.isValid {
             AudioDeviceStop(aggregateID, procID)
             AudioDeviceDestroyIOProcID(aggregateID, procID)
+            deviceProcID = nil
         }
-        deviceProcID = nil
 
         if aggregateID.isValid {
-            AudioHardwareDestroyAggregateDevice(aggregateID)
-            aggregateID = .unknown
+            let status = AudioHardwareDestroyAggregateDevice(aggregateID)
+            if status == noErr {
+                aggregateID = .unknown
+            } else {
+                NSLog("[AppMixer] DestroyAggregateDevice failed (\(status)); will retry")
+            }
         }
         if tapID.isValid {
-            AudioHardwareDestroyProcessTap(tapID)
-            tapID = .unknown
+            let status = AudioHardwareDestroyProcessTap(tapID)
+            if status == noErr {
+                tapID = .unknown
+            } else {
+                NSLog("[AppMixer] DestroyProcessTap failed (\(status)); will retry")
+            }
         }
         state.level = 0
     }
@@ -175,6 +213,14 @@ final class ProcessTap {
         var g = state.gain
         let inBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let outBuffers = UnsafeMutableAudioBufferListPointer(output)
+
+        // 先に出力を無音化しておく。書き込まなかった領域に前サイクルの
+        // 音が残って繰り返しノイズになるのを防ぐ。
+        for i in 0..<outBuffers.count {
+            if let outData = outBuffers[i].mData {
+                memset(outData, 0, Int(outBuffers[i].mDataByteSize))
+            }
+        }
 
         var peak: Float = 0
         let pairCount = min(inBuffers.count, outBuffers.count)
@@ -197,15 +243,6 @@ final class ProcessTap {
                 memcpy(outData, inData, Int(byteCount))
             } else {
                 vDSP_vsmul(inPtr, 1, &g, outPtr, 1, vDSP_Length(floatCount))
-            }
-        }
-
-        // 出力バッファが余る場合は無音化
-        if outBuffers.count > pairCount {
-            for i in pairCount..<outBuffers.count {
-                if let outData = outBuffers[i].mData {
-                    memset(outData, 0, Int(outBuffers[i].mDataByteSize))
-                }
             }
         }
 

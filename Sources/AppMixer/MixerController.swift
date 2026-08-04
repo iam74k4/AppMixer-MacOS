@@ -20,26 +20,30 @@ final class MixerController {
 
     private(set) var states: [String: State] = [:]
     private var taps: [String: ProcessTap] = [:]
+    /// 破棄に失敗し、再試行が必要なタップ。放置すると対象アプリが無音のままになる。
+    private var pendingTeardown: [ProcessTap] = []
     private var deviceListenerInstalled = false
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
 
     /// マスター音量/ミュートが外部（F11/F12 やシステム設定）で変わったときに呼ばれる。
     var onMasterChanged: (() -> Void)?
 
+    /// 音声プロセスの増減（アプリ起動/終了、ブラウザの新規タブ等）を検知したときに呼ばれる。
+    var onProcessListChanged: (() -> Void)?
+
     init() {
         installDefaultDeviceListener()
         installMasterListeners()
+        installProcessListListener()
     }
 
     deinit {
         removeDefaultDeviceListener()
         removeMasterListeners()
+        removeProcessListListener()
         for tap in taps.values { tap.invalidate() }
         taps.removeAll()
     }
-
-    /// タップ対象アプリの音声は .mutedWhenTapped で通常経路から外れているため、
-    /// タップを破棄しない限り無音のままになる。終了時の後始末が必須。
 
     // MARK: - Per-app state
 
@@ -56,18 +60,21 @@ final class MixerController {
         taps[id] != nil
     }
 
-    func setVolume(_ volume: Float, for app: AudioApp) {
+    /// 音量を設定する。実際に反映できたら true（false ならタップを張れていない）。
+    @discardableResult
+    func setVolume(_ volume: Float, for app: AudioApp) -> Bool {
         var s = states[app.id] ?? State()
         s.volume = max(0.0, min(1.0, volume))
         states[app.id] = s
-        apply(s, for: app)
+        return apply(s, for: app)
     }
 
-    func setMuted(_ muted: Bool, for app: AudioApp) {
+    @discardableResult
+    func setMuted(_ muted: Bool, for app: AudioApp) -> Bool {
         var s = states[app.id] ?? State()
         s.muted = muted
         states[app.id] = s
-        apply(s, for: app)
+        return apply(s, for: app)
     }
 
     /// 永続化した状態を復元する（デフォルトと異なる場合のみタップを張る）。
@@ -78,7 +85,10 @@ final class MixerController {
 
     func reset(for app: AudioApp) {
         states[app.id] = State()
-        taps[app.id]?.invalidate()
+        if let tap = taps[app.id] {
+            tap.invalidate()
+            retireIfNeeded(tap)
+        }
         taps.removeValue(forKey: app.id)
     }
 
@@ -86,8 +96,8 @@ final class MixerController {
     /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
     func syncTaps(with apps: [AudioApp]) {
         for app in apps {
-            let state = states[app.id] ?? State()
-            guard state.effectiveGain < 0.999 else { continue }
+            // 設定を変えていないアプリにタップは要らない。
+            guard let state = states[app.id], state.effectiveGain < 0.999 else { continue }
             apply(state, for: app)
         }
     }
@@ -95,55 +105,101 @@ final class MixerController {
     /// 全タップを破棄して、各アプリの音声を通常経路へ戻す。
     /// 終了時に必ず呼ぶこと（呼ばないとアプリが無音のままになりうる）。
     func shutdown() {
-        for tap in taps.values { tap.invalidate() }
+        for tap in taps.values {
+            tap.invalidate()
+            // 一度で破棄できないことがあるため、その場で再試行する。
+            if !tap.isFullyTornDown { tap.invalidate() }
+        }
         taps.removeAll()
+        retryPendingTeardown()
     }
 
     /// 消えたアプリのタップと状態を掃除する。
     /// （音量設定そのものは UserDefaults 側に残るため、再検出時に復元される）
     func prune(aliveIDs: Set<String>) {
+        retryPendingTeardown()
         for id in taps.keys where !aliveIDs.contains(id) {
-            taps[id]?.invalidate()
+            if let tap = taps[id] {
+                tap.invalidate()
+                retireIfNeeded(tap)
+            }
             taps.removeValue(forKey: id)
         }
         states = states.filter { aliveIDs.contains($0.key) }
     }
 
-    private func apply(_ state: State, for app: AudioApp) {
+    /// 音量設定を反映する。要求どおりの状態にできたら true。
+    @discardableResult
+    private func apply(_ state: State, for app: AudioApp) -> Bool {
         let gain = state.effectiveGain
-
-        if gain >= 0.999 {
-            taps[app.id]?.invalidate()
-            taps.removeValue(forKey: app.id)
-            return
-        }
 
         if let tap = taps[app.id] {
             // 同じアプリでも、再起動や新しい音声ヘルパー（ブラウザの新規タブ等）で
             // プロセスオブジェクトが入れ替わる。その場合は張り直さないと、
             // 死んだ ID をタップしたままになり新しい音声に効かなくなる。
-            if tap.processObjectIDs == app.processObjectIDs {
+            // 列挙順は保証されないため集合で比較する。
+            if Set(tap.processObjectIDs) == Set(app.processObjectIDs) {
+                // 100% でもタップは張ったままにする（素通し）。スライダーを
+                // 100% 付近で往復するたびに集約デバイスを作り直すと、その
+                // デバイスで再生中の全アプリが音飛びするため。
                 tap.gain = gain
-                return
+                return true
             }
-            tap.invalidate()
-            taps.removeValue(forKey: app.id)
+            // 先に新しいタップを起動してから古い方を破棄する（make-before-break）。
+            // 先に破棄すると、その間だけ対象アプリが通常経路に戻り、
+            // ミュート中でも全音量で鳴ってしまう。
+            if let replacement = makeTap(for: app, gain: gain) {
+                tap.invalidate()
+                retireIfNeeded(tap)
+                taps[app.id] = replacement
+                return true
+            }
+            // 張り替えに失敗したら、古いタップを残す方が安全（設定を失わない）。
+            NSLog("[AppMixer] Keeping previous tap for \(app.name); rebuild failed")
+            return false
         }
 
+        // タップが無く、原音のままでよいなら何もしない。
+        if gain >= 0.999 { return true }
+
+        guard let tap = makeTap(for: app, gain: gain) else { return false }
+        taps[app.id] = tap
+        return true
+    }
+
+    private func makeTap(for app: AudioApp, gain: Float) -> ProcessTap? {
         let tap = ProcessTap(processObjectIDs: app.processObjectIDs)
         tap.gain = gain
         do {
             try tap.activate()
-            taps[app.id] = tap
+            return tap
         } catch {
             NSLog("[AppMixer] Failed to activate tap for \(app.name): \(error)")
+            return nil
         }
+    }
+
+    /// 破棄しきれなかったタップは、対象アプリを無音のまま残すため保持して再試行する。
+    private func retireIfNeeded(_ tap: ProcessTap) {
+        guard !tap.isFullyTornDown else { return }
+        pendingTeardown.append(tap)
+    }
+
+    /// 破棄に失敗したタップの再破棄を試みる。
+    private func retryPendingTeardown() {
+        guard !pendingTeardown.isEmpty else { return }
+        for tap in pendingTeardown { tap.invalidate() }
+        pendingTeardown.removeAll { $0.isFullyTornDown }
     }
 
     // MARK: - Master (default output device)
 
     var masterVolumeSupported: Bool {
         CoreAudioObject.outputVolumeSupported(CoreAudioObject.defaultOutputDeviceID())
+    }
+
+    var masterMuteSupported: Bool {
+        CoreAudioObject.outputMuteSupported(CoreAudioObject.defaultOutputDeviceID())
     }
 
     func masterVolume() -> Float {
@@ -175,19 +231,23 @@ final class MixerController {
         reinstallMasterListeners()
         onMasterChanged?()
 
+        retryPendingTeardown()
+
         let snapshot = taps
         for (id, oldTap) in snapshot {
-            let gain = oldTap.gain
-            let objectIDs = oldTap.processObjectIDs
-            oldTap.invalidate()
-            let newTap = ProcessTap(processObjectIDs: objectIDs)
-            newTap.gain = gain
+            let newTap = ProcessTap(processObjectIDs: oldTap.processObjectIDs)
+            newTap.gain = oldTap.gain
             do {
+                // 新しい出力先のタップを起動してから古い方を落とす。
+                // 逆順にすると、その隙間だけ対象アプリが全音量で鳴る。
                 try newTap.activate()
+                oldTap.invalidate()
+                retireIfNeeded(oldTap)
                 taps[id] = newTap
             } catch {
+                // 失敗時は古いタップを残す。破棄してしまうと設定が失われ、
+                // ミュート中のアプリが突然鳴り出す。
                 NSLog("[AppMixer] Rebuild tap failed (\(id)): \(error)")
-                taps.removeValue(forKey: id)
             }
         }
     }
@@ -272,5 +332,37 @@ final class MixerController {
     private func reinstallMasterListeners() {
         removeMasterListeners()
         installMasterListeners()
+    }
+
+    // MARK: - Process list listener
+    //
+    // ポップオーバーを開いていない間にアプリが再起動したり、ブラウザが新しい
+    // 音声ヘルパーを作ったりしても追従できるようにする。これが無いと、
+    // 次にポップオーバーを開くまで新しい音声が全音量で鳴り続ける。
+
+    private var processListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private var processListBlock: AudioObjectPropertyListenerBlock?
+
+    private func installProcessListListener() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onProcessListChanged?()
+        }
+        if AudioObjectAddPropertyListenerBlock(
+            .system, &processListAddress, DispatchQueue.main, block
+        ) == noErr {
+            processListBlock = block
+        }
+    }
+
+    private func removeProcessListListener() {
+        guard let block = processListBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(
+            .system, &processListAddress, DispatchQueue.main, block
+        )
+        processListBlock = nil
     }
 }

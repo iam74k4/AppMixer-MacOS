@@ -199,13 +199,35 @@ enum CoreAudioObject {
 
     /// 既定出力デバイスがマスター音量制御に対応しているか。
     static func outputVolumeSupported(_ deviceID: AudioObjectID) -> Bool {
-        for element in [kAudioObjectPropertyElementMain, AudioObjectPropertyElement(1)] {
+        settable(deviceID, selector: kAudioDevicePropertyVolumeScalar,
+                 elements: [kAudioObjectPropertyElementMain, 1])
+    }
+
+    /// 既定出力デバイスがミュート制御に対応しているか。
+    /// 音量が設定できてもミュートは持たないデバイスがあるため、別に判定する。
+    static func outputMuteSupported(_ deviceID: AudioObjectID) -> Bool {
+        settable(deviceID, selector: kAudioDevicePropertyMute,
+                 elements: [kAudioObjectPropertyElementMain])
+    }
+
+    /// いずれかの要素で書き込み可能なプロパティかどうか。
+    private static func settable(
+        _ deviceID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        elements: [AudioObjectPropertyElement]
+    ) -> Bool {
+        for element in elements {
             var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
+                mSelector: selector,
                 mScope: kAudioObjectPropertyScopeOutput,
                 mElement: element
             )
-            if AudioObjectHasProperty(deviceID, &address) { return true }
+            var isSettable: DarwinBoolean = false
+            if AudioObjectHasProperty(deviceID, &address),
+               AudioObjectIsPropertySettable(deviceID, &address, &isSettable) == noErr,
+               isSettable.boolValue {
+                return true
+            }
         }
         return false
     }

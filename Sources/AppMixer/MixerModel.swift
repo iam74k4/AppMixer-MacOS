@@ -15,6 +15,8 @@ final class MixerModel: ObservableObject {
         var level: Float
         /// タップが張られている（＝レベルを計測できる）場合のみメーターを表示する。
         var metered: Bool
+        /// 音量を反映できなかった（タップを張れていない）。表示と実際の音が食い違う。
+        var failed: Bool = false
         var id: String { app.id }
     }
 
@@ -25,6 +27,7 @@ final class MixerModel: ObservableObject {
     @Published var masterVolume: Float = 1.0
     @Published var masterMuted: Bool = false
     @Published var masterSupported: Bool = true
+    @Published var masterMuteSupported: Bool = true
     @Published var outputName: String = ""
 
     @Published var permission: AudioCapturePermission.Status = .notDetermined
@@ -35,11 +38,19 @@ final class MixerModel: ObservableObject {
     private var terminationObserver: NSObjectProtocol?
     /// 自分の書き込みによるリスナー反射を無視する期限。
     private var suppressMasterSyncUntil: Date?
+    /// プロセス一覧はまとまって変化するため、少し待ってから一度だけ同期する。
+    private var processResyncWorkItem: DispatchWorkItem?
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
         controller.onMasterChanged = { [weak self] in
             MainActor.assumeIsolated { self?.refreshMaster() }
+        }
+
+        // 音声プロセスの増減に追従する。ポップオーバーを開いていなくても、
+        // 再起動したアプリや新しい音声ヘルパーにタップを張り直す必要がある。
+        controller.onProcessListChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.scheduleProcessResync() }
         }
 
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
@@ -94,8 +105,11 @@ final class MixerModel: ObservableObject {
     func refresh() {
         let enumerated = AudioAppEnumerator.enumerate()
 
-        // 新規アプリは永続化した設定を復元
-        for app in enumerated where controller.states[app.id] == nil {
+        // 新規アプリは永続化した設定を復元する。
+        // 再生中のものだけに絞る。停止中のアプリまで一斉にタップを張ると、
+        // 集約デバイスの生成が連続してそのデバイス上の全再生が音飛びする。
+        // 停止中のアプリは、再生を始めた時点でプロセス一覧の変化を拾って復元される。
+        for app in enumerated where controller.states[app.id] == nil && app.isRunningOutput {
             if let saved = loadSetting(for: app) {
                 controller.restore(saved, for: app)
             }
@@ -120,9 +134,20 @@ final class MixerModel: ObservableObject {
         permission = AudioCapturePermission.current()
     }
 
+    /// プロセス一覧の変化をまとめて処理する（連続通知を 1 回に束ねる）。
+    private func scheduleProcessResync() {
+        processResyncWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        processResyncWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
     /// マスター音量まわりだけを読み直す（外部変更の反映用）。
     func refreshMaster() {
         masterSupported = controller.masterVolumeSupported
+        masterMuteSupported = controller.masterMuteSupported
         outputName = controller.defaultOutputName()
 
         // 自分で書いた直後は、その反射を無視して操作中の値を保つ。
@@ -134,30 +159,36 @@ final class MixerModel: ObservableObject {
 
     private func tickMeters() {
         guard !apps.isEmpty else { return }
+        // 変化があったときだけ書き込む。毎フレーム代入すると、全アプリが
+        // 無音でも 30fps で画面全体の再描画を起こしてしまう。
         for index in apps.indices {
             let id = apps[index].id
-            apps[index].level = controller.level(forID: id)
-            apps[index].metered = controller.hasTap(forID: id)
+            let level = controller.level(forID: id)
+            let metered = controller.hasTap(forID: id)
+            if apps[index].level != level { apps[index].level = level }
+            if apps[index].metered != metered { apps[index].metered = metered }
         }
     }
 
     // MARK: - Per-app control
 
     func setVolume(_ volume: Float, for app: AudioApp) {
-        controller.setVolume(volume, for: app)
+        let ok = controller.setVolume(volume, for: app)
         saveSetting(for: app)
         updateRow(app.id) {
             $0.volume = volume
             $0.metered = controller.hasTap(forID: app.id)
+            $0.failed = !ok
         }
     }
 
     func setMuted(_ muted: Bool, for app: AudioApp) {
-        controller.setMuted(muted, for: app)
+        let ok = controller.setMuted(muted, for: app)
         saveSetting(for: app)
         updateRow(app.id) {
             $0.muted = muted
             $0.metered = controller.hasTap(forID: app.id)
+            $0.failed = !ok
         }
     }
 
@@ -167,14 +198,23 @@ final class MixerModel: ObservableObject {
         // 自分の書き込みもリスナーを起こすため、その反射でスライダーが
         // 操作中に跳ねないよう、直後の短い間だけ外部反映を抑制する。
         suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
-        controller.setMasterVolume(volume)
-        masterVolume = volume
+        if controller.setMasterVolume(volume) {
+            masterVolume = volume
+        } else {
+            // 書き込めないデバイスもある。効いていない値を表示し続けない。
+            suppressMasterSyncUntil = nil
+            refreshMaster()
+        }
     }
 
     func setMasterMuted(_ muted: Bool) {
         suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
-        controller.setMasterMuted(muted)
-        masterMuted = muted
+        if controller.setMasterMuted(muted) {
+            masterMuted = muted
+        } else {
+            suppressMasterSyncUntil = nil
+            refreshMaster()
+        }
     }
 
     // MARK: - Permission / app control
@@ -182,7 +222,8 @@ final class MixerModel: ObservableObject {
     func requestPermission() {
         AudioCapturePermission.request { [weak self] granted in
             guard let self else { return }
-            self.permission = granted ? .authorized : .denied
+            // 拒否と決めつけない。まだ聞かれていないだけの場合がある。
+            self.permission = granted ? .authorized : AudioCapturePermission.current()
             self.refresh()
         }
     }

@@ -82,7 +82,7 @@ struct ContentView: View {
                     .frame(width: 18)
             }
             .buttonStyle(.borderless)
-            .disabled(!model.masterSupported)
+            .disabled(!model.masterMuteSupported)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("マスター")
@@ -127,8 +127,10 @@ struct ContentView: View {
     // MARK: - App list
 
     private var appList: some View {
-        Group {
-            if model.filteredApps.isEmpty {
+        // 一度だけ絞り込む。ForEach の中で参照すると行数ぶん再計算される。
+        let rows = model.filteredApps
+        return Group {
+            if rows.isEmpty {
                 Text(model.showAllApps ? "アプリが見つかりません" : "再生中のアプリはありません")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -137,9 +139,9 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(model.filteredApps) { display in
+                        ForEach(rows) { display in
                             AppRowView(model: model, display: display)
-                            if display.id != model.filteredApps.last?.id {
+                            if display.id != rows.last?.id {
                                 Divider().padding(.leading, 44)
                             }
                         }
