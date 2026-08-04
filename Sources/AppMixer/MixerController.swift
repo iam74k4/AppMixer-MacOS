@@ -300,21 +300,29 @@ final class MixerController {
         let deviceID = CoreAudioObject.defaultOutputDeviceID()
         guard deviceID.isValid else { return }
 
+        // デバイスによって通知が来る要素が違う（メイン要素を持たず
+        // チャンネル 1/2 側だけで通知するものがある）ため、
+        // ワイルドカードに頼らず候補をすべて登録する。重複して呼ばれても
+        // 反映処理は冪等なので害はない。
+        let elements: [AudioObjectPropertyElement] = [
+            kAudioObjectPropertyElementMain, 1, 2, kAudioObjectPropertyElementWildcard
+        ]
         for selector in Self.masterSelectors {
-            // 要素はワイルドカードにする。デバイスによってはメイン要素ではなく
-            // チャンネル 1/2 側で音量変更が通知されるため。
-            var address = AudioObjectPropertyAddress(
-                mSelector: selector,
-                mScope: kAudioObjectPropertyScopeOutput,
-                mElement: kAudioObjectPropertyElementWildcard
-            )
-            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                self?.onMasterChanged?()
-            }
-            if AudioObjectAddPropertyListenerBlock(
-                deviceID, &address, DispatchQueue.main, block
-            ) == noErr {
-                masterListeners.append((deviceID, address, block))
+            for element in elements {
+                var address = AudioObjectPropertyAddress(
+                    mSelector: selector,
+                    mScope: kAudioObjectPropertyScopeOutput,
+                    mElement: element
+                )
+                guard AudioObjectHasProperty(deviceID, &address) else { continue }
+                let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                    self?.onMasterChanged?()
+                }
+                if AudioObjectAddPropertyListenerBlock(
+                    deviceID, &address, DispatchQueue.main, block
+                ) == noErr {
+                    masterListeners.append((deviceID, address, block))
+                }
             }
         }
     }

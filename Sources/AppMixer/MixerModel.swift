@@ -40,6 +40,8 @@ final class MixerModel: ObservableObject {
     private var suppressMasterSyncUntil: Date?
     /// プロセス一覧はまとまって変化するため、少し待ってから一度だけ同期する。
     private var processResyncWorkItem: DispatchWorkItem?
+    /// マスター音量のポーリング頻度を落とすためのカウンタ。
+    private var meterTick: UInt64 = 0
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
@@ -144,20 +146,34 @@ final class MixerModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
-    /// マスター音量まわりだけを読み直す（外部変更の反映用）。
+    /// マスター音量まわりを読み直す（対応可否やデバイス名も含む）。
     func refreshMaster() {
         masterSupported = controller.masterVolumeSupported
         masterMuteSupported = controller.masterMuteSupported
         outputName = controller.defaultOutputName()
+        syncMasterValues()
+    }
 
+    /// 音量とミュートの現在値だけを読み直す（ポーリング用の軽い経路）。
+    private func syncMasterValues() {
         // 自分で書いた直後は、その反射を無視して操作中の値を保つ。
-        if let until = suppressMasterSyncUntil, Date() < until { return }
-        suppressMasterSyncUntil = nil
-        masterVolume = controller.masterVolume()
-        masterMuted = controller.masterMuted()
+        if let until = suppressMasterSyncUntil {
+            if Date() < until { return }
+            suppressMasterSyncUntil = nil
+        }
+        let volume = controller.masterVolume()
+        let muted = controller.masterMuted()
+        // 変化したときだけ書き込み、無駄な再描画を避ける。
+        if masterVolume != volume { masterVolume = volume }
+        if masterMuted != muted { masterMuted = muted }
     }
 
     private func tickMeters() {
+        // 表示中は自前で読みに行く。デバイスによってはプロパティ通知が
+        // 届かないことがあり、リスナーだけだと F11/F12 に追従できない。
+        meterTick &+= 1
+        if meterTick % 3 == 0 { syncMasterValues() }
+
         guard !apps.isEmpty else { return }
         // 変化があったときだけ書き込む。毎フレーム代入すると、全アプリが
         // 無音でも 30fps で画面全体の再描画を起こしてしまう。
