@@ -33,6 +33,9 @@ final class MixerController {
         taps.removeAll()
     }
 
+    /// タップ対象アプリの音声は .mutedWhenTapped で通常経路から外れているため、
+    /// タップを破棄しない限り無音のままになる。終了時の後始末が必須。
+
     // MARK: - Per-app state
 
     func state(forID id: String) -> State {
@@ -74,6 +77,23 @@ final class MixerController {
         taps.removeValue(forKey: app.id)
     }
 
+    /// 現在のアプリ一覧に合わせてタップを同期する。
+    /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
+    func syncTaps(with apps: [AudioApp]) {
+        for app in apps {
+            let state = states[app.id] ?? State()
+            guard state.effectiveGain < 0.999 else { continue }
+            apply(state, for: app)
+        }
+    }
+
+    /// 全タップを破棄して、各アプリの音声を通常経路へ戻す。
+    /// 終了時に必ず呼ぶこと（呼ばないとアプリが無音のままになりうる）。
+    func shutdown() {
+        for tap in taps.values { tap.invalidate() }
+        taps.removeAll()
+    }
+
     /// 消えたアプリのタップと状態を掃除する。
     /// （音量設定そのものは UserDefaults 側に残るため、再検出時に復元される）
     func prune(aliveIDs: Set<String>) {
@@ -94,8 +114,15 @@ final class MixerController {
         }
 
         if let tap = taps[app.id] {
-            tap.gain = gain
-            return
+            // 同じアプリでも、再起動や新しい音声ヘルパー（ブラウザの新規タブ等）で
+            // プロセスオブジェクトが入れ替わる。その場合は張り直さないと、
+            // 死んだ ID をタップしたままになり新しい音声に効かなくなる。
+            if tap.processObjectIDs == app.processObjectIDs {
+                tap.gain = gain
+                return
+            }
+            tap.invalidate()
+            taps.removeValue(forKey: app.id)
         }
 
         let tap = ProcessTap(processObjectIDs: app.processObjectIDs)

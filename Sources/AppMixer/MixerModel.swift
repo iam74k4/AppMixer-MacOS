@@ -32,6 +32,25 @@ final class MixerModel: ObservableObject {
     private let controller = MixerController()
     private let defaults = UserDefaults.standard
     private var meterTimer: Timer?
+    private var terminationObserver: NSObjectProtocol?
+
+    init() {
+        // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
+        // 後始末をせずに終了するとそのアプリが無音のままになる。
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.controller.shutdown() }
+        }
+    }
+
+    deinit {
+        if let terminationObserver {
+            NotificationCenter.default.removeObserver(terminationObserver)
+        }
+    }
 
     // MARK: - Derived
 
@@ -75,6 +94,8 @@ final class MixerModel: ObservableObject {
             }
         }
         controller.prune(aliveIDs: Set(enumerated.map(\.id)))
+        // 音声ヘルパーが入れ替わったアプリのタップを張り直す
+        controller.syncTaps(with: enumerated)
 
         apps = enumerated.map { app in
             let state = controller.state(forID: app.id)
@@ -154,6 +175,8 @@ final class MixerModel: ObservableObject {
     }
 
     func quit() {
+        // 終了通知が届く前に確実にタップを解除し、各アプリの音声を戻す。
+        controller.shutdown()
         NSApp.terminate(nil)
     }
 
