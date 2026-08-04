@@ -33,8 +33,15 @@ final class MixerModel: ObservableObject {
     private let defaults = UserDefaults.standard
     private var meterTimer: Timer?
     private var terminationObserver: NSObjectProtocol?
+    /// 自分の書き込みによるリスナー反射を無視する期限。
+    private var suppressMasterSyncUntil: Date?
 
     init() {
+        // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
+        controller.onMasterChanged = { [weak self] in
+            MainActor.assumeIsolated { self?.refreshMaster() }
+        }
+
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
         // 後始末をせずに終了するとそのアプリが無音のままになる。
         terminationObserver = NotificationCenter.default.addObserver(
@@ -109,11 +116,20 @@ final class MixerModel: ObservableObject {
             )
         }
 
+        refreshMaster()
+        permission = AudioCapturePermission.current()
+    }
+
+    /// マスター音量まわりだけを読み直す（外部変更の反映用）。
+    func refreshMaster() {
         masterSupported = controller.masterVolumeSupported
+        outputName = controller.defaultOutputName()
+
+        // 自分で書いた直後は、その反射を無視して操作中の値を保つ。
+        if let until = suppressMasterSyncUntil, Date() < until { return }
+        suppressMasterSyncUntil = nil
         masterVolume = controller.masterVolume()
         masterMuted = controller.masterMuted()
-        outputName = controller.defaultOutputName()
-        permission = AudioCapturePermission.current()
     }
 
     private func tickMeters() {
@@ -148,11 +164,15 @@ final class MixerModel: ObservableObject {
     // MARK: - Master
 
     func setMasterVolume(_ volume: Float) {
+        // 自分の書き込みもリスナーを起こすため、その反射でスライダーが
+        // 操作中に跳ねないよう、直後の短い間だけ外部反映を抑制する。
+        suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
         controller.setMasterVolume(volume)
         masterVolume = volume
     }
 
     func setMasterMuted(_ muted: Bool) {
+        suppressMasterSyncUntil = Date().addingTimeInterval(0.15)
         controller.setMasterMuted(muted)
         masterMuted = muted
     }

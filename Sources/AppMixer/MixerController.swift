@@ -23,12 +23,17 @@ final class MixerController {
     private var deviceListenerInstalled = false
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
 
+    /// マスター音量/ミュートが外部（F11/F12 やシステム設定）で変わったときに呼ばれる。
+    var onMasterChanged: (() -> Void)?
+
     init() {
         installDefaultDeviceListener()
+        installMasterListeners()
     }
 
     deinit {
         removeDefaultDeviceListener()
+        removeMasterListeners()
         for tap in taps.values { tap.invalidate() }
         taps.removeAll()
     }
@@ -166,6 +171,10 @@ final class MixerController {
     // MARK: - Default output device change
 
     private func rebuildActiveTaps() {
+        // 出力先が変わったので、マスター音量の監視対象も新しいデバイスへ移す。
+        reinstallMasterListeners()
+        onMasterChanged?()
+
         let snapshot = taps
         for (id, oldTap) in snapshot {
             let gain = oldTap.gain
@@ -210,5 +219,58 @@ final class MixerController {
         )
         deviceListenerBlock = nil
         deviceListenerInstalled = false
+    }
+
+    // MARK: - Master volume / mute listeners
+    //
+    // F11/F12 やシステム設定でマスター音量が変わったことを検知する。
+    // これが無いと、ポップオーバーを開き直すまで表示が古いままになる。
+
+    /// 監視中のデバイスと、解除に必要なブロックを保持する。
+    private var masterListeners: [(deviceID: AudioObjectID,
+                                   address: AudioObjectPropertyAddress,
+                                   block: AudioObjectPropertyListenerBlock)] = []
+
+    private static let masterSelectors: [AudioObjectPropertySelector] = [
+        kAudioDevicePropertyVolumeScalar,
+        kAudioDevicePropertyMute
+    ]
+
+    private func installMasterListeners() {
+        let deviceID = CoreAudioObject.defaultOutputDeviceID()
+        guard deviceID.isValid else { return }
+
+        for selector in Self.masterSelectors {
+            // 要素はワイルドカードにする。デバイスによってはメイン要素ではなく
+            // チャンネル 1/2 側で音量変更が通知されるため。
+            var address = AudioObjectPropertyAddress(
+                mSelector: selector,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementWildcard
+            )
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.onMasterChanged?()
+            }
+            if AudioObjectAddPropertyListenerBlock(
+                deviceID, &address, DispatchQueue.main, block
+            ) == noErr {
+                masterListeners.append((deviceID, address, block))
+            }
+        }
+    }
+
+    private func removeMasterListeners() {
+        for var listener in masterListeners {
+            AudioObjectRemovePropertyListenerBlock(
+                listener.deviceID, &listener.address, DispatchQueue.main, listener.block
+            )
+        }
+        masterListeners.removeAll()
+    }
+
+    /// 既定出力デバイスが変わったら、監視対象も張り替える。
+    private func reinstallMasterListeners() {
+        removeMasterListeners()
+        installMasterListeners()
     }
 }
