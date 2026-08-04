@@ -102,6 +102,19 @@ final class MixerController {
         }
     }
 
+    /// メーター表示のためだけに張ったタップ（音量を変えていないもの）を破棄する。
+    /// 表示していない間まで全アプリの音声を経由させ続けない。
+    func releaseMeteringOnlyTaps() {
+        retryPendingTeardown()
+        for (id, tap) in taps {
+            let state = states[id] ?? State()
+            guard state.effectiveGain >= 0.999 else { continue }
+            tap.invalidate()
+            retireIfNeeded(tap)
+            taps.removeValue(forKey: id)
+        }
+    }
+
     /// 全タップを破棄して、各アプリの音声を通常経路へ戻す。
     /// 終了時に必ず呼ぶこと（呼ばないとアプリが無音のままになりうる）。
     func shutdown() {
@@ -162,6 +175,22 @@ final class MixerController {
         // タップが無く、原音のままでよいなら何もしない。
         if gain >= 0.999 { return true }
 
+        guard let tap = makeTap(for: app, gain: gain) else { return false }
+        taps[app.id] = tap
+        return true
+    }
+
+    /// メーター表示のためにタップを用意する（音量は変えない）。
+    /// タップを張らないとそのアプリのレベルは計測できないため、
+    /// 再生中のアプリには原音のままタップを張る。
+    /// 集約デバイスの生成は一度に一つだけ行い、まとめて作らない
+    /// （連続して作るとそのデバイス上の全再生が音飛びする）。
+    @discardableResult
+    func ensureMeteringTap(for app: AudioApp) -> Bool {
+        if let tap = taps[app.id] {
+            return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
+        }
+        let gain = (states[app.id] ?? State()).effectiveGain
         guard let tap = makeTap(for: app, gain: gain) else { return false }
         taps[app.id] = tap
         return true

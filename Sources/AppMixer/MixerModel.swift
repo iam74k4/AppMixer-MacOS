@@ -100,6 +100,12 @@ final class MixerModel: ObservableObject {
     func onDisappear() {
         meterTimer?.invalidate()
         meterTimer = nil
+        // 表示していない間は、メーター用に張っただけのタップを解放する。
+        // 音量を変えたアプリのタップはそのまま維持する。
+        controller.releaseMeteringOnlyTaps()
+        for index in apps.indices {
+            apps[index].metered = controller.hasTap(forID: apps[index].id)
+        }
     }
 
     // MARK: - Refresh
@@ -134,6 +140,45 @@ final class MixerModel: ObservableObject {
 
         refreshMaster()
         permission = AudioCapturePermission.current()
+    }
+
+    /// メーターがまだ出ていない再生中のアプリを 1 つだけ拾ってタップを張る。
+    private func attachNextMeteringTap() {
+        guard permission == .authorized else { return }
+        guard let index = apps.firstIndex(where: { $0.app.isRunningOutput && !$0.metered }) else {
+            return
+        }
+        let app = apps[index].app
+        let ok = controller.ensureMeteringTap(for: app)
+        apps[index].metered = controller.hasTap(forID: app.id)
+        // 失敗しても音量設定そのものが効いていないとは限らないので、
+        // 既に失敗表示が無い行にだけ印を付ける。
+        if !ok && !apps[index].failed && apps[index].volume < 0.999 {
+            apps[index].failed = true
+        }
+    }
+
+    /// 一覧の顔ぶれや再生状態が変わったときだけ作り直す。
+    /// 毎秒まるごと差し替えると、操作中のスライダーが揺れてしまう。
+    private func refreshAppsIfChanged() {
+        let enumerated = AudioAppEnumerator.enumerate()
+        let current = apps.map { AppFingerprint($0.app) }
+        let latest = enumerated.map { AppFingerprint($0) }
+        guard current != latest else { return }
+        refresh()
+    }
+
+    /// 一覧を作り直すべきかの判定に使う指紋。
+    private struct AppFingerprint: Equatable {
+        let id: String
+        let running: Bool
+        let processObjectIDs: Set<AudioObjectID>
+
+        init(_ app: AudioApp) {
+            id = app.id
+            running = app.isRunningOutput
+            processObjectIDs = Set(app.processObjectIDs)
+        }
     }
 
     /// プロセス一覧の変化をまとめて処理する（連続通知を 1 回に束ねる）。
@@ -173,6 +218,15 @@ final class MixerModel: ObservableObject {
         // 届かないことがあり、リスナーだけだと F11/F12 に追従できない。
         meterTick &+= 1
         if meterTick % 3 == 0 { syncMasterValues() }
+
+        // 表示中はアプリ一覧も定期的に見直す。プロセス一覧は「プロセスの
+        // 生成/破棄」でしか変化しないため、起動済みのアプリが再生を
+        // 始めただけでは通知が来ず、一覧に現れないままになる。
+        if meterTick % 30 == 0 { refreshAppsIfChanged() }
+
+        // 再生中でメーターの出ていないアプリに、順番にタップを張っていく。
+        // 一度に一つだけにして、集約デバイスの一斉生成による音飛びを避ける。
+        if meterTick % 15 == 0 { attachNextMeteringTap() }
 
         guard !apps.isEmpty else { return }
         // 変化があったときだけ書き込む。毎フレーム代入すると、全アプリが

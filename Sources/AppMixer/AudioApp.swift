@@ -92,16 +92,13 @@ enum AudioAppEnumerator {
             }
 
             let key = bundleID ?? "pid:\(owningApp?.processIdentifier ?? pid)"
-            let runningOutput: UInt32 = CoreAudioObject.read(
-                objectID, selector: kAudioProcessPropertyIsRunningOutput, defaultValue: 0
-            )
 
             let builder = builders[key] ?? Builder(
                 bundleID: bundleID, name: name, iconAppPID: owningApp?.processIdentifier
             )
             builder.objectIDs.append(objectID)
             builder.pids.append(pid)
-            if runningOutput != 0 { builder.runningOutput = true }
+            if isRunningOutput(objectID) { builder.runningOutput = true }
             builders[key] = builder
         }
 
@@ -121,5 +118,25 @@ enum AudioAppEnumerator {
             if $0.isRunningOutput != $1.isRunningOutput { return $0.isRunningOutput }
             return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
+    }
+
+    /// このプロセスが今まさに音を出しているか。
+    /// IsRunningOutput を持たないプロセスオブジェクトもあるため、
+    /// 無い場合は IsRunning にフォールバックする。これを怠ると、
+    /// 実際は再生中のアプリが一覧から漏れる。
+    private static func isRunningOutput(_ objectID: AudioObjectID) -> Bool {
+        if CoreAudioObject.hasProperty(objectID, selector: kAudioProcessPropertyIsRunningOutput) {
+            let value: UInt32 = CoreAudioObject.read(
+                objectID, selector: kAudioProcessPropertyIsRunningOutput, defaultValue: 0
+            )
+            if value != 0 { return true }
+        }
+        if CoreAudioObject.hasProperty(objectID, selector: kAudioProcessPropertyIsRunning) {
+            let value: UInt32 = CoreAudioObject.read(
+                objectID, selector: kAudioProcessPropertyIsRunning, defaultValue: 0
+            )
+            return value != 0
+        }
+        return false
     }
 }

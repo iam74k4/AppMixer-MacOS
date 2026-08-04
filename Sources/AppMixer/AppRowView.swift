@@ -51,9 +51,9 @@ struct AppRowView: View {
                     .disabled(display.muted)
                 }
 
-                // タップが張られているときだけメーターを表示する
-                // （100% のアプリはタップを張らないためレベルを計測できない）
-                if display.metered {
+                // 再生中は常にメーターの場所を確保する。タップが張られるまでは
+                // 空のバーを出しておき、レベルが乗った時点で伸びる。
+                if display.app.isRunningOutput {
                     meterBar
                 }
             }
