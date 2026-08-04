@@ -44,6 +44,9 @@ final class MixerModel: ObservableObject {
     /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
     private var lastTick: Date?
     private var idleWatchdog: Timer?
+    /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
+    private var meteringFailures: [String: Int] = [:]
+    private static let meteringRetryLimit = 3
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
@@ -165,11 +168,22 @@ final class MixerModel: ObservableObject {
         // .notDetermined のままになることがあり、そこで弾くと
         // 実際には許可されていてもメーターが永久に出なくなる。
         // 張れなければ activate() が失敗するだけなので、まず試す。
-        guard let index = apps.firstIndex(where: { $0.app.isRunningOutput && !$0.metered }) else {
+        // タップを張れないアプリ（システムプロセス等）で延々と再試行して
+        // 後続のアプリにメーターが付かなくなるのを防ぐため、
+        // 失敗が続いたものは対象から外す。
+        guard let index = apps.firstIndex(where: {
+            $0.app.isRunningOutput && !$0.metered
+                && (meteringFailures[$0.id] ?? 0) < Self.meteringRetryLimit
+        }) else {
             return
         }
         let app = apps[index].app
         let ok = controller.ensureMeteringTap(for: app)
+        if ok {
+            meteringFailures[app.id] = nil
+        } else {
+            meteringFailures[app.id, default: 0] += 1
+        }
         apps[index].metered = controller.hasTap(forID: app.id)
         // 失敗しても音量設定そのものが効いていないとは限らないので、
         // 既に失敗表示が無い行にだけ印を付ける。
