@@ -42,8 +42,10 @@ enum AudioCapturePermission {
         // dlopen したハンドルはコールバックが非同期のため意図的に閉じない。
         guard let handle = dlopen(tccPath, RTLD_NOW),
               let sym = dlsym(handle, "TCCAccessRequest") else {
-            // SPI 不可: 暗黙プロンプトに委ねるため、ここでは楽観的に true を返す。
-            DispatchQueue.main.async { completion(true) }
+            // SPI が使えない場合は最初のタップ生成時に暗黙プロンプトが出る。
+            // 権限を持っていると誤表示しないよう、ここでは現在の状態をそのまま返す。
+            let granted = current() == .authorized
+            DispatchQueue.main.async { completion(granted) }
             return
         }
         let requestFn = unsafeBitCast(sym, to: RequestFunc.self)

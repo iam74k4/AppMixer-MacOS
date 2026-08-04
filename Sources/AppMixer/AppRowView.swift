@@ -46,7 +46,11 @@ struct AppRowView: View {
                     .disabled(display.muted)
                 }
 
-                meterBar
+                // タップが張られているときだけメーターを表示する
+                // （100% のアプリはタップを張らないためレベルを計測できない）
+                if display.metered {
+                    meterBar
+                }
             }
         }
         .padding(.horizontal, 14)

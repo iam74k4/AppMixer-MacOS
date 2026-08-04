@@ -43,6 +43,11 @@ final class MixerController {
         taps[id]?.level ?? 0
     }
 
+    /// タップが張られているか（＝メーターを表示できるか）。
+    func hasTap(forID id: String) -> Bool {
+        taps[id] != nil
+    }
+
     func setVolume(_ volume: Float, for app: AudioApp) {
         var s = states[app.id] ?? State()
         s.volume = max(0.0, min(1.0, volume))
@@ -69,12 +74,14 @@ final class MixerController {
         taps.removeValue(forKey: app.id)
     }
 
-    /// 消えたアプリのタップを掃除。
+    /// 消えたアプリのタップと状態を掃除する。
+    /// （音量設定そのものは UserDefaults 側に残るため、再検出時に復元される）
     func prune(aliveIDs: Set<String>) {
         for id in taps.keys where !aliveIDs.contains(id) {
             taps[id]?.invalidate()
             taps.removeValue(forKey: id)
         }
+        states = states.filter { aliveIDs.contains($0.key) }
     }
 
     private func apply(_ state: State, for app: AudioApp) {

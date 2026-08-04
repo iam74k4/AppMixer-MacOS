@@ -13,6 +13,8 @@ final class MixerModel: ObservableObject {
         var volume: Float
         var muted: Bool
         var level: Float
+        /// タップが張られている（＝レベルを計測できる）場合のみメーターを表示する。
+        var metered: Bool
         var id: String { app.id }
     }
 
@@ -47,9 +49,13 @@ final class MixerModel: ObservableObject {
     func onAppear() {
         refresh()
         meterTimer?.invalidate()
-        meterTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+        // .common モードで登録する。既定の .default だけだと、スライダー操作中
+        // （ランループが .eventTracking になる）にメーターが止まってしまう。
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tickMeters() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
     }
 
     func onDisappear() {
@@ -77,7 +83,8 @@ final class MixerModel: ObservableObject {
                 icon: app.icon,
                 volume: state.volume,
                 muted: state.muted,
-                level: controller.level(forID: app.id)
+                level: controller.level(forID: app.id),
+                metered: controller.hasTap(forID: app.id)
             )
         }
 
@@ -91,7 +98,9 @@ final class MixerModel: ObservableObject {
     private func tickMeters() {
         guard !apps.isEmpty else { return }
         for index in apps.indices {
-            apps[index].level = controller.level(forID: apps[index].id)
+            let id = apps[index].id
+            apps[index].level = controller.level(forID: id)
+            apps[index].metered = controller.hasTap(forID: id)
         }
     }
 
@@ -100,13 +109,19 @@ final class MixerModel: ObservableObject {
     func setVolume(_ volume: Float, for app: AudioApp) {
         controller.setVolume(volume, for: app)
         saveSetting(for: app)
-        updateRow(app.id) { $0.volume = volume }
+        updateRow(app.id) {
+            $0.volume = volume
+            $0.metered = controller.hasTap(forID: app.id)
+        }
     }
 
     func setMuted(_ muted: Bool, for app: AudioApp) {
         controller.setMuted(muted, for: app)
         saveSetting(for: app)
-        updateRow(app.id) { $0.muted = muted }
+        updateRow(app.id) {
+            $0.muted = muted
+            $0.metered = controller.hasTap(forID: app.id)
+        }
     }
 
     // MARK: - Master

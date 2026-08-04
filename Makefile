@@ -24,7 +24,14 @@ IDENTITY ?= -
 
 all: sign
 
+# Process Tap API は macOS 14.4 SDK 以降でしか解決できない（Xcode 15.3+）。
+# 古い SDK だと "cannot find 'CATapDescription' in scope" になるため事前に検査する。
 build:
+	@sdk="$$(xcrun --show-sdk-version 2>/dev/null)"; \
+	major="$${sdk%%.*}"; minor="$$(echo "$$sdk" | cut -d. -f2)"; minor="$${minor:-0}"; \
+	if [ -z "$$sdk" ] || [ "$$major" -lt 14 ] || { [ "$$major" -eq 14 ] && [ "$$minor" -lt 4 ]; }; then \
+		echo "error: macOS 14.4 SDK 以降が必要です (Xcode 15.3+)。検出: $${sdk:-none}"; exit 1; \
+	fi
 	swift build -c $(CONFIG)
 
 bundle: build
