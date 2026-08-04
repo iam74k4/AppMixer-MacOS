@@ -4,6 +4,11 @@ struct ContentView: View {
 
     @ObservedObject var model: MixerModel
 
+    // ビューが表示されている間だけ動くタイマー。onAppear/onDisappear は
+    // MenuBarExtra(.window) では期待どおりに来ないことがあるため、
+    // 表示に紐づくこちらでメーター更新を駆動する。
+    private let ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -22,9 +27,10 @@ struct ContentView: View {
             Divider()
             footer
         }
-        .frame(width: 340)
+        .frame(width: 420)
         .onAppear { model.onAppear() }
         .onDisappear { model.onDisappear() }
+        .onReceive(ticker) { _ in model.tick() }
     }
 
     // MARK: - Header
@@ -147,7 +153,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 360)
+                .frame(maxHeight: 460)
             }
         }
     }

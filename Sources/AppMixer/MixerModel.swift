@@ -34,7 +34,6 @@ final class MixerModel: ObservableObject {
 
     private let controller = MixerController()
     private let defaults = UserDefaults.standard
-    private var meterTimer: Timer?
     private var terminationObserver: NSObjectProtocol?
     /// 自分の書き込みによるリスナー反射を無視する期限。
     private var suppressMasterSyncUntil: Date?
@@ -42,6 +41,9 @@ final class MixerModel: ObservableObject {
     private var processResyncWorkItem: DispatchWorkItem?
     /// マスター音量のポーリング頻度を落とすためのカウンタ。
     private var meterTick: UInt64 = 0
+    /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
+    private var lastTick: Date?
+    private var idleWatchdog: Timer?
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
@@ -64,9 +66,12 @@ final class MixerModel: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.controller.shutdown() }
         }
+
+        startIdleWatchdog()
     }
 
     deinit {
+        idleWatchdog?.invalidate()
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
@@ -87,19 +92,31 @@ final class MixerModel: ObservableObject {
 
     func onAppear() {
         refresh()
-        meterTimer?.invalidate()
-        // .common モードで登録する。既定の .default だけだと、スライダー操作中
-        // （ランループが .eventTracking になる）にメーターが止まってしまう。
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tickMeters() }
+    }
+
+    /// 表示中に一定間隔で呼ばれる（駆動はビュー側のタイマー）。
+    func tick() {
+        lastTick = Date()
+        tickMeters()
+    }
+
+    /// 表示が終わったのに onDisappear が来ないことがあるため、
+    /// tick が途絶えたら（＝閉じられたら）メーター用タップを解放する。
+    private func startIdleWatchdog() {
+        let timer = Timer(timeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.releaseMetersIfIdle() }
         }
         RunLoop.main.add(timer, forMode: .common)
-        meterTimer = timer
+        idleWatchdog = timer
+    }
+
+    private func releaseMetersIfIdle() {
+        guard let lastTick, Date().timeIntervalSince(lastTick) > 2.0 else { return }
+        self.lastTick = nil
+        controller.releaseMeteringOnlyTaps()
     }
 
     func onDisappear() {
-        meterTimer?.invalidate()
-        meterTimer = nil
         // 表示していない間は、メーター用に張っただけのタップを解放する。
         // 音量を変えたアプリのタップはそのまま維持する。
         controller.releaseMeteringOnlyTaps()
@@ -144,7 +161,10 @@ final class MixerModel: ObservableObject {
 
     /// メーターがまだ出ていない再生中のアプリを 1 つだけ拾ってタップを張る。
     private func attachNextMeteringTap() {
-        guard permission == .authorized else { return }
+        // 権限状態では判定しない。TCC の状態取得は環境によって
+        // .notDetermined のままになることがあり、そこで弾くと
+        // 実際には許可されていてもメーターが永久に出なくなる。
+        // 張れなければ activate() が失敗するだけなので、まず試す。
         guard let index = apps.firstIndex(where: { $0.app.isRunningOutput && !$0.metered }) else {
             return
         }

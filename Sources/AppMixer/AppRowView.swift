@@ -59,7 +59,7 @@ struct AppRowView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
     }
 
     private var icon: some View {
@@ -75,7 +75,7 @@ struct AppRowView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(width: 28, height: 28)
+        .frame(width: 32, height: 32)
     }
 
     private var meterBar: some View {
@@ -85,9 +85,10 @@ struct AppRowView: View {
                 Capsule()
                     .fill(meterColor)
                     .frame(width: geo.size.width * CGFloat(min(1, max(0, display.level))))
+                    .animation(.linear(duration: 0.05), value: display.level)
             }
         }
-        .frame(height: 3)
+        .frame(height: 6)
     }
 
     private var meterColor: Color {
