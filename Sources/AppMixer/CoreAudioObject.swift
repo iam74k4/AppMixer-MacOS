@@ -76,7 +76,6 @@ enum CoreAudioObject {
     // MARK: - 便利メソッド
 
     /// pid からプロセス AudioObjectID へ変換（qualifier として pid を渡す）。
-    @available(macOS 14.2, *)
     static func processObject(for pid: pid_t) -> AudioObjectID {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
@@ -110,5 +109,104 @@ enum CoreAudioObject {
     /// デバイス名。
     static func deviceName(_ deviceID: AudioObjectID) -> String? {
         readString(deviceID, selector: kAudioDevicePropertyDeviceNameCFString)
+    }
+
+    // MARK: - マスター音量 / ミュート（既定出力デバイス）
+
+    /// 既定出力デバイスの音量（0...1）。取得不可なら nil。
+    static func outputVolume(_ deviceID: AudioObjectID) -> Float? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = Float32(0)
+        var size = UInt32(MemoryLayout<Float32>.size)
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr {
+            return value
+        }
+        // メイン要素が無いデバイスはチャンネル1を代表値にする
+        address.mElement = 1
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr {
+            return value
+        }
+        return nil
+    }
+
+    /// 既定出力デバイスの音量を設定（0...1）。成功で true。
+    @discardableResult
+    static func setOutputVolume(_ deviceID: AudioObjectID, _ volume: Float) -> Bool {
+        var value = Float32(max(0, min(1, volume)))
+        let size = UInt32(MemoryLayout<Float32>.size)
+
+        // まずメイン要素、駄目ならチャンネル1/2に個別設定
+        let elements: [AudioObjectPropertyElement] = [kAudioObjectPropertyElementMain, 1, 2]
+        var didSet = false
+        for element in elements {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+            var settable: DarwinBoolean = false
+            if AudioObjectHasProperty(deviceID, &address),
+               AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr,
+               settable.boolValue,
+               AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &value) == noErr {
+                didSet = true
+                if element == kAudioObjectPropertyElementMain { break }
+            }
+        }
+        return didSet
+    }
+
+    /// 既定出力デバイスがミュートされているか。
+    static func outputMuted(_ deviceID: AudioObjectID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr {
+            return value != 0
+        }
+        return false
+    }
+
+    /// 既定出力デバイスのミュートを設定。成功で true。
+    @discardableResult
+    static func setOutputMuted(_ deviceID: AudioObjectID, _ muted: Bool) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute,
+            mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = UInt32(muted ? 1 : 0)
+        let size = UInt32(MemoryLayout<UInt32>.size)
+        var settable: DarwinBoolean = false
+        if AudioObjectHasProperty(deviceID, &address),
+           AudioObjectIsPropertySettable(deviceID, &address, &settable) == noErr,
+           settable.boolValue {
+            return AudioObjectSetPropertyData(deviceID, &address, 0, nil, size, &value) == noErr
+        }
+        return false
+    }
+
+    /// 既定出力デバイスがマスター音量制御に対応しているか。
+    static func outputVolumeSupported(_ deviceID: AudioObjectID) -> Bool {
+        for element in [kAudioObjectPropertyElementMain, AudioObjectPropertyElement(1)] {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioObjectPropertyScopeOutput,
+                mElement: element
+            )
+            if AudioObjectHasProperty(deviceID, &address) { return true }
+        }
+        return false
     }
 }

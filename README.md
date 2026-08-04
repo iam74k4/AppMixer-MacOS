@@ -39,21 +39,33 @@ make run
 
 ## 使い方
 
-1. メニューバーの `slider.vertical.3` アイコンをクリック
-2. **いま音を出しているアプリ**が一覧表示される（例: Music, Safari, Chrome…）
-3. 各行の**スライダー**でそのアプリの音量を変更、**🔊ボタン**でミュート
-   - 100% のときはタップを張らず通常再生（低負荷）
-   - 100% 未満／ミュート時にだけ Process Tap が起動し、音量を適用
+メニューバーの `slider.vertical.3` アイコンをクリックすると、SwiftUI のポップオーバーが開きます。
+
+- **アプリ別音量 / ミュート** — 各行のスライダーとスピーカーボタン
+  - 100% のときはタップを張らず通常再生（低負荷）
+  - 100% 未満／ミュート時にだけ Process Tap が起動し、音量を適用
+- **ライブ音量メーター** — 各行下部のバーが実際の出力レベルを表示（約30fps）
+- **マスター音量 / 全体ミュート** — 既定出力デバイス自体の音量を操作
+- **アプリ別音量の記憶** — bundleID ごとに保存し、次回以降そのアプリを検出したら自動復元
+- **検索 / 全アプリ表示** — 名前で絞り込み。「全アプリ」で停止中のアプリも表示
+
+### アプリ表示について
+Edge / Chrome / Discord などは音声を**ヘルパープロセス**から出すため、素朴に列挙すると
+`com.microsoft.edge.helper` のような名前になります。本アプリは親プロセスを辿って
+**本体アプリ（正しい名前とアイコン）に解決**し、同じアプリの複数ヘルパーを**1行にまとめて**扱います。
 
 ---
 
 ## 動作確認の手順
 
 1. 音楽アプリ（Music など）で再生を始める
-2. メニューを開き、その行のスライダーを 50% に下げる → **音量が下がる**
+2. ポップオーバーを開き、その行のスライダーを 50% に下げる → **音量が下がる**
 3. ミュートボタンを押す → **無音になる**（他アプリの音はそのまま）
 4. スライダーを 100% に戻す → **原音に戻り、タップが破棄される**
-5. 出力デバイス（スピーカー↔ヘッドフォン）を切り替えても、下げた音量が維持されることを確認
+5. 出力デバイス（スピーカー↔ヘッドフォン）を切り替えても、下げた音量が維持される
+6. Edge / Chrome で動画を再生 → **正しいアプリ名とアイコン**で 1 行だけ表示される
+7. アプリを終了して再度 `make run` → **前回下げた音量が復元**される
+8. マスタースライダーを動かす → システム全体の音量が変わる
 
 ---
 
@@ -103,16 +115,25 @@ Makefile                          .app バンドル生成・署名・起動
 bundle/Info.plist                 NSAudioCaptureUsageDescription / LSUIElement など
 bundle/AppMixer.entitlements      audio-input エンタイトルメント（ローカル開発用）
 Sources/AppMixer/
-  main.swift                      エントリポイント（メニューバー常駐）
-  AppDelegate.swift               ステータスアイテム・メニュー構築・権限フロー
-  AppVolumeItemView.swift         アプリ1行分の UI（アイコン/名前/スライダー/ミュート）
-  MixerController.swift           音量状態管理・タップの生成/破棄・既定デバイス追従
-  ProcessTap.swift                Process Tap + 集約デバイス + IOProc（ゲイン適用）
-  AudioProcess.swift              出力中プロセスの列挙モデル
+  AppMixerApp.swift               @main / MenuBarExtra(.window) エントリポイント
+  ContentView.swift               ポップオーバー全体（ヘッダ/マスター/検索/一覧）
+  AppRowView.swift                アプリ1行（アイコン/名前/スライダー/ミュート/メーター）
+  MixerModel.swift                SwiftUI 用 ObservableObject・永続化・メーター更新
+  MixerController.swift           音量状態管理・タップ生成破棄・マスター音量・デバイス追従
+  ProcessTap.swift                Process Tap + 集約デバイス + IOProc（ゲイン適用/ピーク計測）
+  AudioApp.swift                  アプリ単位にまとめた音声プロセスの列挙
+  ProcessIdentity.swift           ヘルパープロセス → 本体アプリの解決（親 pid 探索）
   AudioCapturePermission.swift    kTCCServiceAudioCapture の状態確認/要求
-  CoreAudioObject.swift           AudioObjectID プロパティ読み取りヘルパー
+  CoreAudioObject.swift           AudioObjectID プロパティ読み取り/書き込みヘルパー
 docs/                             基礎検討・方式比較ドキュメント
 ```
+
+## ロードマップ
+
+- **Phase 1（実装済み）** SwiftUI 刷新 / アプリ識別・アイコン / アプリ別音量・ミュート /
+  ライブメーター / マスター音量 / 設定の記憶 / 検索・全アプリ表示
+- **Phase 2** 自動ダッキング（会議・マイク連動で自動的にメディアを絞る）
+- **Phase 3** ラウドネス自動正規化 / シーン・プロファイル切替
 
 ---
 

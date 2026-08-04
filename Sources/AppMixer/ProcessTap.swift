@@ -2,18 +2,17 @@ import Foundation
 import CoreAudio
 import Accelerate
 
-// 1 プロセスに対する Process Tap。
+// 1 アプリ（複数の音声プロセスを含む）に対する Process Tap。
 //
 // 構成（Pattern A）:
-//   - CATapDescription(stereoMixdownOfProcesses:) + muteBehavior = .mutedWhenTapped
-//     → 対象アプリの音は通常の出力経路から消える（二重再生を防ぐ）
-//   - プライベート集約デバイス = 既定出力デバイス(サブデバイス) + このタップ(サブタップ)
-//   - 単一 IOProc が「タップ入力 × ゲイン」を出力デバイスへ書き込む
+//   - CATapDescription(stereoMixdownOfProcesses: [全プロセス]) + .mutedWhenTapped
+//     → 対象アプリの音は通常経路から消える（二重再生防止）
+//   - プライベート集約デバイス = 既定出力デバイス + このタップ
+//   - 単一 IOProc が「タップ入力 × ゲイン」を出力へ書き込み、同時にピークを計測
 //
 // gain は UI スレッドから書き換え、IOProc（オーディオスレッド）から読む。
-// Float の整列済み読み書きはティアリングしないため、MVP では単純変数で扱う。
+// level（0...1 の直近ピーク）は IOProc が書き、UI から読む（メーター用）。
 
-@available(macOS 14.2, *)
 final class ProcessTap {
 
     enum TapError: Error, CustomStringConvertible {
@@ -34,19 +33,21 @@ final class ProcessTap {
         }
     }
 
-    let processObjectID: AudioObjectID
+    let processObjectIDs: [AudioObjectID]
 
-    /// 0.0（無音）〜 1.0（原音）。1.0 超で増幅も可能だがクリップ注意。
+    /// 0.0（無音）〜 1.0（原音）。UI から設定、IOProc が参照。
     var gain: Float = 1.0
+
+    /// 直近のピーク（0...1）。IOProc が更新、UI が参照（メーター）。
+    private(set) var level: Float = 0
 
     private var tapID: AudioObjectID = .unknown
     private var aggregateID: AudioObjectID = .unknown
     private var deviceProcID: AudioDeviceIOProcID?
-    private var streamDescription = AudioStreamBasicDescription()
     private let ioQueue = DispatchQueue(label: "com.appmixer.ioproc")
 
-    init(processObjectID: AudioObjectID) {
-        self.processObjectID = processObjectID
+    init(processObjectIDs: [AudioObjectID]) {
+        self.processObjectIDs = processObjectIDs
     }
 
     deinit { invalidate() }
@@ -54,8 +55,7 @@ final class ProcessTap {
     // MARK: - Lifecycle
 
     func activate() throws {
-        // 1) タップ生成
-        let tapDescription = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
+        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
         tapDescription.uuid = UUID()
         tapDescription.muteBehavior = .mutedWhenTapped
         tapDescription.isPrivate = true
@@ -67,22 +67,15 @@ final class ProcessTap {
         }
         tapID = newTapID
 
-        // タップのフォーマット（ログ/将来のフォーマット整合用）
-        streamDescription = CoreAudioObject.read(
-            tapID, selector: kAudioTapPropertyFormat, defaultValue: AudioStreamBasicDescription()
-        )
-
-        // 2) 既定出力デバイスの UID
         let outputDeviceID = CoreAudioObject.defaultOutputDeviceID()
         guard outputDeviceID.isValid, let outputUID = CoreAudioObject.deviceUID(outputDeviceID) else {
             invalidate()
             throw TapError.noOutputDevice
         }
 
-        // 3) プライベート集約デバイス（出力デバイス + タップ）
         let aggregateUID = UUID().uuidString
         let description: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "AppMixer-Tap-\(processObjectID)",
+            kAudioAggregateDeviceNameKey: "AppMixer-\(aggregateUID.prefix(8))",
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,
@@ -107,7 +100,6 @@ final class ProcessTap {
         }
         aggregateID = newAggregateID
 
-        // 4) IOProc: タップ入力 × ゲイン → 出力
         var procID: AudioDeviceIOProcID?
         let ioBlock: AudioDeviceIOBlock = { [weak self] _, inInputData, _, outOutputData, _ in
             self?.render(input: inInputData, output: outOutputData)
@@ -141,6 +133,7 @@ final class ProcessTap {
             AudioHardwareDestroyProcessTap(tapID)
             tapID = .unknown
         }
+        level = 0
     }
 
     // MARK: - Realtime render (audio thread)
@@ -153,7 +146,9 @@ final class ProcessTap {
         let inBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let outBuffers = UnsafeMutableAudioBufferListPointer(output)
 
+        var peak: Float = 0
         let pairCount = min(inBuffers.count, outBuffers.count)
+
         for i in 0..<pairCount {
             let inBuffer = inBuffers[i]
             let outBuffer = outBuffers[i]
@@ -161,17 +156,22 @@ final class ProcessTap {
 
             let byteCount = min(inBuffer.mDataByteSize, outBuffer.mDataByteSize)
             let floatCount = Int(byteCount) / MemoryLayout<Float>.size
+            let inPtr = inData.assumingMemoryBound(to: Float.self)
+            let outPtr = outData.assumingMemoryBound(to: Float.self)
+
+            // ピーク（入力の絶対値最大）を計測
+            var localPeak: Float = 0
+            vDSP_maxmgv(inPtr, 1, &localPeak, vDSP_Length(floatCount))
+            peak = max(peak, localPeak)
 
             if g == 1.0 {
                 memcpy(outData, inData, Int(byteCount))
             } else {
-                let inPtr = inData.assumingMemoryBound(to: Float.self)
-                let outPtr = outData.assumingMemoryBound(to: Float.self)
                 vDSP_vsmul(inPtr, 1, &g, outPtr, 1, vDSP_Length(floatCount))
             }
         }
 
-        // 入力より出力バッファが多い場合は残りを無音化
+        // 出力バッファが余る場合は無音化
         if outBuffers.count > pairCount {
             for i in pairCount..<outBuffers.count {
                 if let outData = outBuffers[i].mData {
@@ -179,5 +179,9 @@ final class ProcessTap {
                 }
             }
         }
+
+        // 減衰付きピークホールド（実効ゲインを反映して表示）
+        let displayPeak = min(1.0, peak * g)
+        level = max(displayPeak, level * 0.82)
     }
 }

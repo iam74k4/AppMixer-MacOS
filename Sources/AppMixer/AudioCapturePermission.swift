@@ -8,7 +8,7 @@ import Foundation
 
 enum AudioCapturePermission {
 
-    enum Status {
+    enum Status: Equatable {
         case authorized
         case denied
         case notDetermined
