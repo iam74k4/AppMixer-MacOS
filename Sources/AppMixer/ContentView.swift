@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 struct ContentView: View {
 
@@ -7,7 +8,9 @@ struct ContentView: View {
     // ビューが表示されている間だけ動くタイマー。onAppear/onDisappear は
     // MenuBarExtra(.window) では期待どおりに来ないことがあるため、
     // 表示に紐づくこちらでメーター更新を駆動する。
-    private let ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
+    // @State で保持する。let にすると body 再評価のたびに作り直され、
+    // カウントダウンが振り出しに戻って更新間隔が乱れる。
+    @State private var ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {

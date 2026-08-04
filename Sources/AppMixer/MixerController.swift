@@ -22,6 +22,9 @@ final class MixerController {
     private var taps: [String: ProcessTap] = [:]
     /// 破棄に失敗し、再試行が必要なタップ。放置すると対象アプリが無音のままになる。
     private var pendingTeardown: [ProcessTap] = []
+    private var teardownRetryScheduled = false
+    /// メーター用タップを 1 つずつ解放している最中か。
+    private var draining = false
     private var deviceListenerInstalled = false
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
 
@@ -104,15 +107,36 @@ final class MixerController {
 
     /// メーター表示のためだけに張ったタップ（音量を変えていないもの）を破棄する。
     /// 表示していない間まで全アプリの音声を経由させ続けない。
+    ///
+    /// 一度に全部壊すと、集約デバイスの破棄がまとめて走って音飛びし、
+    /// メインスレッドも詰まるため、1 つずつ間隔をあけて解放する。
     func releaseMeteringOnlyTaps() {
         retryPendingTeardown()
-        for (id, tap) in taps {
-            let state = states[id] ?? State()
-            guard state.effectiveGain >= 0.999 else { continue }
+
+        let releasable = taps.keys.filter { (states[$0] ?? State()).effectiveGain >= 0.999 }
+        guard let id = releasable.first else {
+            draining = false
+            return
+        }
+        if let tap = taps.removeValue(forKey: id) {
             tap.invalidate()
             retireIfNeeded(tap)
-            taps.removeValue(forKey: id)
         }
+
+        guard releasable.count > 1 else {
+            draining = false
+            return
+        }
+        draining = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self, self.draining else { return }
+            self.releaseMeteringOnlyTaps()
+        }
+    }
+
+    /// 解放処理を中断する（表示が再開されたときに呼ぶ）。
+    func cancelMeteringRelease() {
+        draining = false
     }
 
     /// 全タップを破棄して、各アプリの音声を通常経路へ戻す。
@@ -185,12 +209,29 @@ final class MixerController {
     /// 再生中のアプリには原音のままタップを張る。
     /// 集約デバイスの生成は一度に一つだけ行い、まとめて作らない
     /// （連続して作るとそのデバイス上の全再生が音飛びする）。
+    /// 現在のプロセス構成に一致するタップが張られているか。
+    /// 古い（ヘルパーが入れ替わった）タップは「無し」と同じ扱いにする。
+    func hasFreshTap(for app: AudioApp) -> Bool {
+        guard let tap = taps[app.id] else { return false }
+        return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
+    }
+
     @discardableResult
     func ensureMeteringTap(for app: AudioApp) -> Bool {
-        if let tap = taps[app.id] {
-            return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
-        }
+        cancelMeteringRelease()
         let gain = (states[app.id] ?? State()).effectiveGain
+
+        if let tap = taps[app.id] {
+            if Set(tap.processObjectIDs) == Set(app.processObjectIDs) { return true }
+            // ヘルパーが入れ替わったタップは計測できない（メーターが 0 のまま）。
+            // 新しい方を起動してから古い方を破棄する。
+            guard let replacement = makeTap(for: app, gain: gain) else { return false }
+            tap.invalidate()
+            retireIfNeeded(tap)
+            taps[app.id] = replacement
+            return true
+        }
+
         guard let tap = makeTap(for: app, gain: gain) else { return false }
         taps[app.id] = tap
         return true
@@ -212,6 +253,20 @@ final class MixerController {
     private func retireIfNeeded(_ tap: ProcessTap) {
         guard !tap.isFullyTornDown else { return }
         pendingTeardown.append(tap)
+        // 何かのきっかけを待つのではなく、自分で再試行を予約する。
+        // 放置すると、ユーザーが触っていないアプリが無音のまま取り残される。
+        scheduleTeardownRetry()
+    }
+
+    private func scheduleTeardownRetry() {
+        guard !teardownRetryScheduled, !pendingTeardown.isEmpty else { return }
+        teardownRetryScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            self.teardownRetryScheduled = false
+            self.retryPendingTeardown()
+            self.scheduleTeardownRetry()
+        }
     }
 
     /// 破棄に失敗したタップの再破棄を試みる。
@@ -333,8 +388,10 @@ final class MixerController {
         // チャンネル 1/2 側だけで通知するものがある）ため、
         // ワイルドカードに頼らず候補をすべて登録する。重複して呼ばれても
         // 反映処理は冪等なので害はない。
+        // ワイルドカードは併用しない。具体要素の登録と二重に一致して
+        // 1 回の音量変更で通知が何度も飛んでしまう。
         let elements: [AudioObjectPropertyElement] = [
-            kAudioObjectPropertyElementMain, 1, 2, kAudioObjectPropertyElementWildcard
+            kAudioObjectPropertyElementMain, 1, 2
         ]
         for selector in Self.masterSelectors {
             for element in elements {

@@ -114,9 +114,13 @@ enum AudioAppEnumerator {
             )
         }
 
+        // 同名・同状態のアプリで順序が揺れると一覧を作り直し続けてしまうため、
+        // id で必ず決着をつける。
         return apps.sorted {
             if $0.isRunningOutput != $1.isRunningOutput { return $0.isRunningOutput }
-            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            let order = $0.name.localizedCaseInsensitiveCompare($1.name)
+            if order != .orderedSame { return order == .orderedAscending }
+            return $0.id < $1.id
         }
     }
 
@@ -126,10 +130,13 @@ enum AudioAppEnumerator {
     /// 実際は再生中のアプリが一覧から漏れる。
     private static func isRunningOutput(_ objectID: AudioObjectID) -> Bool {
         if CoreAudioObject.hasProperty(objectID, selector: kAudioProcessPropertyIsRunningOutput) {
+            // このプロパティがあるなら、その値がそのまま答え。
+            // false のときに IsRunning へ落とすと、入力だけのプロセス
+            // （通話中のマイクなど）まで「再生中」と誤判定してしまう。
             let value: UInt32 = CoreAudioObject.read(
                 objectID, selector: kAudioProcessPropertyIsRunningOutput, defaultValue: 0
             )
-            if value != 0 { return true }
+            return value != 0
         }
         if CoreAudioObject.hasProperty(objectID, selector: kAudioProcessPropertyIsRunning) {
             let value: UInt32 = CoreAudioObject.read(
