@@ -184,10 +184,14 @@ struct ContentView: View {
                     }
                     .background(
                         // 中身の実寸を測って、その高さにポップオーバーを合わせる。
+                        // onPreferenceChange ではなく onChange を使う。前者の
+                        // クロージャは新しい SDK で @Sendable になっており、
+                        // @State への代入が並行性の診断に引っかかる。
                         GeometryReader { geo in
-                            Color.clear.preference(
-                                key: ListHeightKey.self, value: geo.size.height
-                            )
+                            Color.clear
+                                .onChange(of: geo.size.height, initial: true) { _, height in
+                                    listHeight = height
+                                }
                         }
                     )
                 }
@@ -195,18 +199,7 @@ struct ContentView: View {
                 // 再生中が 1 つでも余白が残ってしまう。中身の高さに合わせ、
                 // 増えすぎたときだけ上限で頭打ちにしてスクロールさせる。
                 .frame(height: min(max(listHeight, Self.minListHeight), Self.maxListHeight))
-                .onPreferenceChange(ListHeightKey.self) { height in
-                    listHeight = height
-                }
             }
-        }
-    }
-
-    /// 一覧の中身の実寸を親へ伝えるためのキー。
-    private struct ListHeightKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = max(value, nextValue())
         }
     }
 

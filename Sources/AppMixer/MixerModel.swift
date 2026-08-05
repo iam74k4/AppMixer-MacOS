@@ -245,19 +245,28 @@ final class MixerModel: ObservableObject {
             guard controller.state(forID: app.id).outputDeviceUID == nil else { continue }
 
             let stored = storedSettings(for: app)
-            if let remembered = stored.perDevice[currentDefaultDeviceUID] {
-                controller.restore(
-                    MixerController.State(
-                        volume: remembered.volume,
-                        muted: remembered.muted,
-                        outputDeviceUID: nil
-                    ),
-                    for: app
-                )
-            } else if controller.states[app.id] != nil {
+            guard let remembered = stored.perDevice[currentDefaultDeviceUID] else {
                 // このデバイスの記憶が無い。いまの音量を引き継いで覚える。
-                saveSetting(for: app)
+                if controller.states[app.id] != nil { saveSetting(for: app) }
+                continue
             }
+
+            // 記憶があっても、鳴っていないアプリにタップは要らない。
+            // ここで一斉にタップを張ると集約デバイスがまとめて作られ、
+            // そのデバイスで再生中の音がすべて飛ぶ。鳴り始めた時点で
+            // refresh() 側が復元するので、状態だけ入れておけばよい。
+            guard app.isRunningOutput || controller.hasTap(forID: app.id) else {
+                continue
+            }
+
+            controller.restore(
+                MixerController.State(
+                    volume: remembered.volume,
+                    muted: remembered.muted,
+                    outputDeviceUID: nil
+                ),
+                for: app
+            )
         }
 
         refresh(with: enumerated)
