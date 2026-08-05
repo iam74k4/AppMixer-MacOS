@@ -101,7 +101,7 @@ def build(c):
         dict(letter="Z", name="Zoom", vol=1.00, level=0.88, pct="100%",
              badge=None, routed=False, meter_color=METER_YELLOW),
     ]
-    H = 44 + 58 + 36 + 62 * len(rows) + 30 + 36
+    H = 44 + 44 + 34 + 62 * len(rows) + 30 + 36
 
     o.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
              f'viewBox="0 0 {W} {H}" role="img" aria-label="AppMixer のミキサー画面">')
@@ -118,25 +118,24 @@ def build(c):
     o.append(text(W - PAD, 27, "MacBook Pro のスピーカー", size=10.5, fill=c["dim"], anchor="end"))
     divider(44)
 
-    # --- master
-    o.append(speaker(PAD, 62, c, size=15))
-    o.append(text(PAD + 28, 66, "マスター", size=10.5, fill=c["dim"]))
-    o.append(slider(PAD + 28, W - 58, 84, 0.75, c))
-    o.append(text(W - PAD, 88, "75%", size=11, fill=c["dim"], anchor="end", mono=True))
-    divider(102)
+    # --- master（アプリ行と同じ 1 行構成）
+    o.append(speaker(PAD, 60, c, size=15))
+    o.append(text(PAD + 28, 72, "すべて", size=12.5, fill=c["text"], weight="500"))
+    o.append(slider(PAD + 84, W - 58, 68, 0.75, c))
+    o.append(text(W - PAD, 72, "75%", size=11, fill=c["dim"], anchor="end", mono=True))
 
     # --- search
-    o.append(f'<circle cx="{PAD + 5}" cy="119" r="4.2" fill="none" stroke="{c["dim"]}" stroke-width="1.3"/>')
-    o.append(f'<line x1="{PAD + 8}" y1="122" x2="{PAD + 11}" y2="125" stroke="{c["dim"]}" '
+    o.append(f'<circle cx="{PAD + 5}" cy="105" r="4.2" fill="none" stroke="{c["dim"]}" stroke-width="1.3"/>')
+    o.append(f'<line x1="{PAD + 8}" y1="108" x2="{PAD + 11}" y2="111" stroke="{c["dim"]}" '
              f'stroke-width="1.3" stroke-linecap="round"/>')
-    o.append(text(PAD + 20, 123, "アプリを検索", size=11.5, fill=c["dim"]))
-    o.append(f'<rect x="{W - 86}" y="114" width="11" height="11" rx="2.5" fill="none" '
+    o.append(text(PAD + 20, 109, "アプリを検索", size=11.5, fill=c["dim"]))
+    o.append(f'<rect x="{W - 86}" y="100" width="11" height="11" rx="2.5" fill="none" '
              f'stroke="{c["dim"]}" stroke-width="1.2"/>')
-    o.append(text(W - 70, 123, "全アプリ", size=10.5, fill=c["dim"]))
-    divider(138)
+    o.append(text(W - 70, 109, "全アプリ", size=10.5, fill=c["dim"]))
+    divider(122)
 
     # --- rows
-    y = 138
+    y = 122
     for i, r in enumerate(rows):
         o.append(tile(PAD, y + 9, r["letter"], c))
         o.append(text(PAD + 40, y + 24, r["name"], size=12.5, fill=c["text"], weight="500"))
@@ -169,8 +168,7 @@ def build(c):
     divider(y)
 
     # --- footer
-    o.append(text(PAD, y + 22, "更新", size=10.5, fill=c["dim"]))
-    o.append(text(W - 74, y + 22, "設定", size=10.5, fill=c["dim"]))
+    o.append(text(PAD, y + 22, "設定", size=10.5, fill=c["dim"]))
     o.append(text(W - PAD, y + 22, "終了", size=10.5, fill=c["dim"], anchor="end"))
 
     o.append("</svg>")

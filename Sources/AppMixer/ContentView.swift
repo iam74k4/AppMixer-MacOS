@@ -19,43 +19,42 @@ struct ContentView: View {
     @State private var listHeight: CGFloat = 0
 
     /// 一覧の高さの下限と上限。上限を超えたぶんはスクロールする。
-    private static let minListHeight: CGFloat = 64
+    private static let minListHeight: CGFloat = 72
     private static let maxListHeight: CGFloat = 460
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            Divider()
 
             if model.permission != .authorized {
                 permissionBanner
-                Divider()
             }
 
             masterSection
-            Divider()
             searchBar
             Divider()
             appList
 
             if model.duckingReason != nil {
-                Divider()
                 duckingBanner
+            }
+
+            // 設定はフッターより上に開く。下に開くと「終了」より後ろに
+            // 設定が現れて、並びが逆さまに見える。
+            if showSettings {
+                Divider()
+                settingsSection
             }
 
             Divider()
             footer
-
-            // 設定は既定で畳んでおく。常に開いていると縦に長くなり、
-            // 主役であるアプリ一覧が埋もれてしまう。
-            if showSettings {
-                Divider()
-                duckingSection
-                Divider()
-                launchAtLoginSection
-            }
         }
         .frame(width: 420)
+        // 他のメニューバーアプリと質感を揃える。単色の板より OS に馴染む。
+        .background(.regularMaterial)
+        .animation(.easeInOut(duration: 0.18), value: model.apps.count)
+        .animation(.easeInOut(duration: 0.18), value: showSettings)
+        .animation(.easeInOut(duration: 0.18), value: model.duckingReason)
         .onAppear { model.onAppear() }
         .onDisappear { model.onDisappear() }
         .onReceive(ticker) { _ in model.tick() }
@@ -63,21 +62,46 @@ struct ContentView: View {
 
     // MARK: - Header
 
+    /// タイトルと、システムの出力先。デバイス名は押すと切り替えられる。
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "slider.vertical.3")
                 .foregroundStyle(.tint)
             Text("AppMixer")
                 .font(.headline)
+
             Spacer()
-            Text(model.outputName)
+
+            Menu {
+                ForEach(model.outputDevices) { device in
+                    Button {
+                        model.setSystemOutputDevice(device)
+                    } label: {
+                        if device.name == model.outputName {
+                            Label(device.name, systemImage: "checkmark")
+                        } else {
+                            Text(device.name)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "hifispeaker")
+                    Text(model.outputName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.borderless)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .help("システム全体の出力先を切り替えます")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Permission
@@ -107,6 +131,7 @@ struct ContentView: View {
 
     // MARK: - Master
 
+    /// アプリ行と同じ 1 行構成にして、視覚的なリズムを揃える。
     private var masterSection: some View {
         HStack(spacing: 10) {
             Button {
@@ -118,18 +143,19 @@ struct ContentView: View {
             .buttonStyle(.borderless)
             .disabled(!model.masterMuteSupported)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text("マスター")
-                    .font(.caption).foregroundStyle(.secondary)
-                Slider(
-                    value: Binding(
-                        get: { Double(model.masterVolume) },
-                        set: { model.setMasterVolume(Float($0)) }
-                    ),
-                    in: 0...1
-                )
-                .disabled(!model.masterSupported || model.masterMuted)
-            }
+            Text("すべて")
+                .font(.callout).fontWeight(.medium)
+                .frame(width: 46, alignment: .leading)
+
+            Slider(
+                value: Binding(
+                    get: { Double(model.masterVolume) },
+                    set: { model.setMasterVolume(Float($0)) }
+                ),
+                in: 0...1
+            )
+            .controlSize(.small)
+            .disabled(!model.masterSupported || model.masterMuted)
 
             Text(model.masterSupported ? "\(Int((model.masterVolume * 100).rounded()))%" : "—")
                 .font(.caption.monospacedDigit())
@@ -137,7 +163,7 @@ struct ContentView: View {
                 .frame(width: 38, alignment: .trailing)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Search
@@ -155,21 +181,16 @@ struct ContentView: View {
                 .font(.caption)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.bottom, 8)
     }
 
     // MARK: - App list
 
     private var appList: some View {
-        // 一度だけ絞り込む。ForEach の中で参照すると行数ぶん再計算される。
         let rows = model.filteredApps
         return Group {
             if rows.isEmpty {
-                Text(model.showAllApps ? "アプリが見つかりません" : "再生中のアプリはありません")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
+                emptyState
             } else {
                 ScrollView {
                     // 遅延生成だと画面外の行が測れず高さが出ないため VStack を使う。
@@ -177,13 +198,10 @@ struct ContentView: View {
                     VStack(spacing: 0) {
                         ForEach(rows) { display in
                             AppRowView(model: model, display: display)
-                            if display.id != rows.last?.id {
-                                Divider().padding(.leading, 44)
-                            }
                         }
                     }
                     .background(
-                        // 中身の実寸を測って、その高さにポップオーバーを合わせる。
+                        // 中身の実寸を測って、その高さに合わせる。
                         // onPreferenceChange ではなく onChange を使う。前者の
                         // クロージャは新しい SDK で @Sendable になっており、
                         // @State への代入が並行性の診断に引っかかる。
@@ -203,6 +221,31 @@ struct ContentView: View {
         }
     }
 
+    /// 何も鳴っていないときの表示。ここで手が止まらないよう、
+    /// 何をすれば一覧に出るのかまで書く。
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Image(systemName: model.showAllApps ? "magnifyingglass" : "speaker.wave.2")
+                .font(.system(size: 22))
+                .foregroundStyle(.tertiary)
+
+            if model.showAllApps {
+                Text("アプリが見つかりません")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("再生中のアプリはありません")
+                    .font(.callout).foregroundStyle(.secondary)
+                Text("音楽や動画を再生すると、ここに表示されます")
+                    .font(.caption).foregroundStyle(.tertiary)
+                Button("すべてのアプリを表示") { model.showAllApps = true }
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 22)
+    }
+
     // MARK: - 自動ダッキング
 
     /// 発動中だけ出す帯。設定を畳んでいても、いま絞られている理由が分かるようにする。
@@ -219,75 +262,73 @@ struct ContentView: View {
         .padding(.vertical, 6)
     }
 
-    private var duckingSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle("通話中は自動で音量を下げる", isOn: Binding(
-                get: { model.duckingEnabled },
-                set: { model.setDuckingEnabled($0) }
-            ))
-            .toggleStyle(.checkbox)
-            .font(.callout)
+    // MARK: - 設定
 
-            if model.duckingEnabled {
-                HStack(spacing: 8) {
-                    Text("下げる音量")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Slider(
-                        value: Binding(
-                            get: { Double(model.duckLevel) },
-                            set: { model.setDuckLevel(Float($0)) }
-                        ),
-                        in: 0...1
-                    )
-                    Text("\(Int((model.duckLevel * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 38, alignment: .trailing)
-                }
-
-                Toggle("マイクの使用も引き金にする", isOn: Binding(
-                    get: { model.duckOnMicrophone },
-                    set: { model.setDuckOnMicrophone($0) }
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("通話中は自動で音量を下げる", isOn: Binding(
+                    get: { model.duckingEnabled },
+                    set: { model.setDuckingEnabled($0) }
                 ))
                 .toggleStyle(.checkbox)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.callout)
+
+                if model.duckingEnabled {
+                    HStack(spacing: 8) {
+                        Text("下げる音量")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Slider(
+                            value: Binding(
+                                get: { Double(model.duckLevel) },
+                                set: { model.setDuckLevel(Float($0)) }
+                            ),
+                            in: 0...1
+                        )
+                        .controlSize(.small)
+                        Text("\(Int((model.duckLevel * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 38, alignment: .trailing)
+                    }
+
+                    Toggle("マイクの使用も引き金にする", isOn: Binding(
+                        get: { model.duckOnMicrophone },
+                        set: { model.setDuckOnMicrophone($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("ログイン時に起動", isOn: Binding(
+                    get: { model.launchAtLogin },
+                    set: { model.setLaunchAtLogin($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.callout)
+
+                if let problem = model.launchAtLoginProblem {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(problem)
+                            .foregroundStyle(.secondary)
+                        Button("設定を開く") { model.openLoginItemsSettings() }
+                            .buttonStyle(.link)
+                    }
+                    .font(.caption)
+                }
             }
         }
         // 外側の VStack は既定で中央寄せのため、幅いっぱいに広げないと
         // 中身の幅しか持たないこのセクションだけ中央に寄ってしまう。
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-    }
-
-    // MARK: - Launch at login
-
-    private var launchAtLoginSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("ログイン時に起動", isOn: Binding(
-                get: { model.launchAtLogin },
-                set: { model.setLaunchAtLogin($0) }
-            ))
-            .toggleStyle(.checkbox)
-            .font(.callout)
-
-            if let problem = model.launchAtLoginProblem {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(problem)
-                        .foregroundStyle(.secondary)
-                    Button("設定を開く") { model.openLoginItemsSettings() }
-                        .buttonStyle(.link)
-                }
-                .font(.caption)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
     }
 
     // MARK: - Footer
@@ -295,22 +336,14 @@ struct ContentView: View {
     private var footer: some View {
         HStack {
             Button {
-                model.refresh()
-            } label: {
-                Label("更新", systemImage: "arrow.clockwise")
-                    .font(.caption)
-            }
-            .buttonStyle(.borderless)
-
-            Spacer()
-
-            Button {
                 showSettings.toggle()
             } label: {
                 Label("設定", systemImage: showSettings ? "chevron.down" : "gearshape")
                     .font(.caption)
             }
             .buttonStyle(.borderless)
+
+            Spacer()
 
             Button {
                 model.quit()
