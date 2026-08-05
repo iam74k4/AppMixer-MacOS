@@ -327,6 +327,13 @@ final class MixerModel: ObservableObject {
         }
     }
 
+    /// システム全体の出力先を切り替える（ヘッダーのデバイス名から呼ぶ）。
+    func setSystemOutputDevice(_ device: AudioDevice) {
+        CoreAudioObject.setDefaultOutputDevice(device.id)
+        // 切り替わったことをリスナーが拾うが、表示は即座に追いつかせる。
+        outputName = device.name
+    }
+
     func outputDeviceName(_ uid: String?) -> String {
         guard let uid else { return "既定の出力" }
         return outputDevices.first { $0.uid == uid }?.name ?? "不明なデバイス"

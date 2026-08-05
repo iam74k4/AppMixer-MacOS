@@ -115,6 +115,19 @@ enum CoreAudioObject {
         read(.system, selector: kAudioHardwarePropertyDefaultOutputDevice, defaultValue: AudioObjectID.unknown)
     }
 
+    /// システムの既定出力デバイスを切り替える。
+    @discardableResult
+    static func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = deviceID
+        let size = UInt32(MemoryLayout<AudioObjectID>.size)
+        return AudioObjectSetPropertyData(.system, &address, 0, nil, size, &value) == noErr
+    }
+
     /// デバイスの UID 文字列。
     static func deviceUID(_ deviceID: AudioObjectID) -> String? {
         readString(deviceID, selector: kAudioDevicePropertyDeviceUID)

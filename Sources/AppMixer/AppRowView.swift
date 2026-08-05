@@ -5,23 +5,38 @@ struct AppRowView: View {
     @ObservedObject var model: MixerModel
     let display: MixerModel.DisplayApp
 
+    /// カーソルが乗っている間だけ、普段は伏せている操作を出す。
+    @State private var isHovered = false
+
     private var app: AudioApp { display.app }
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            icon
-
-            VStack(alignment: .leading, spacing: 5) {
-                titleLine
-                controlLine
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .opacity(app.isRunningOutput ? 1.0 : 0.55)
+    /// 既定から動かしている行は、ホバーしていなくても操作を見せておく。
+    /// そうしないと「なぜこのアプリだけ音が違うのか」が分からなくなる。
+    private var showsControls: Bool {
+        isHovered || display.muted || display.outputDeviceUID != nil
     }
 
-    // MARK: - 1 段目: 名前・状態・音量値・出力先
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 10) {
+                icon
+
+                VStack(alignment: .leading, spacing: 5) {
+                    titleLine
+                    controlLine
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+
+            Divider().padding(.leading, 44)
+        }
+        .opacity(app.isRunningOutput ? 1.0 : 0.55)
+        .background(isHovered ? Color.primary.opacity(0.05) : Color.clear)
+        .onHover { isHovered = $0 }
+    }
+
+    // MARK: - 1 段目: 名前・状態・出力先・音量値
 
     private var titleLine: some View {
         HStack(spacing: 6) {
@@ -34,13 +49,20 @@ struct AppRowView: View {
 
             Spacer(minLength: 6)
 
-            outputMenu
+            if showsControls {
+                outputMenu
+            }
 
             Text(display.muted ? "ミュート" : "\(Int((display.volume * 100).rounded()))%")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(display.muted ? Color.secondary : Color.primary)
                 .frame(width: 52, alignment: .trailing)
-                .help("この音量は「\(model.memoryDeviceName(for: app))」に対して記憶されます")
+                .help("この音量は「\(model.memoryDeviceName(for: app))」に対して記憶されます。"
+                      + "ダブルクリックで 100% に戻します")
+                // スライダーを掴んで戻すより速い、定番の操作。
+                .onTapGesture(count: 2) {
+                    model.setVolume(1.0, for: app)
+                }
         }
     }
 
@@ -63,6 +85,7 @@ struct AppRowView: View {
 
     private var controlLine: some View {
         HStack(spacing: 8) {
+            // ホバー前も場所は確保しておく。出し入れで幅が動くと目障りなため。
             Button {
                 model.setMuted(!display.muted, for: app)
             } label: {
@@ -70,7 +93,9 @@ struct AppRowView: View {
                     .frame(width: 16)
             }
             .buttonStyle(.borderless)
-            .foregroundStyle(display.muted ? Color.secondary : Color.primary)
+            .foregroundStyle(display.muted ? Color.accentColor : Color.secondary)
+            .opacity(showsControls ? 1 : 0)
+            .allowsHitTesting(showsControls)
 
             // スライダーとメーターを同じ幅・同じ開始位置に揃えると、
             // メーターが「そのスライダーのレベル」として読める。
