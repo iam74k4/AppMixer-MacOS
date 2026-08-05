@@ -15,7 +15,24 @@ final class MixerController {
     struct State: Equatable {
         var volume: Float = 1.0
         var muted: Bool = false
-        var effectiveGain: Float { muted ? 0.0 : volume }
+        /// 出力先デバイスの UID。nil なら既定出力に追従する。
+        var outputDeviceUID: String?
+        /// ユーザー操作による音量（ダッキングを含まない）。
+        var userGain: Float { muted ? 0.0 : volume }
+        /// 既定と異なる設定を持っているか（＝タップを維持すべきか）。
+        var isCustomized: Bool { userGain < 0.999 || outputDeviceUID != nil }
+    }
+
+    /// ダッキング中に適用する倍率（1.0 で無効）。
+    private(set) var duckMultiplier: Float = 1.0
+    /// ダッキングの対象外にするアプリ（通話アプリ自身など）。
+    private var duckExcludedIDs: Set<String> = []
+
+    /// そのアプリに実際に適用すべきゲイン。
+    private func targetGain(for id: String) -> Float {
+        let user = (states[id] ?? State()).userGain
+        guard duckMultiplier < 1.0, !duckExcludedIDs.contains(id) else { return user }
+        return user * duckMultiplier
     }
 
     private(set) var states: [String: State] = [:]
@@ -80,6 +97,51 @@ final class MixerController {
         return apply(s, for: app)
     }
 
+    /// 出力先デバイスを設定する（nil で既定出力に戻す）。
+    @discardableResult
+    func setOutputDevice(_ uid: String?, for app: AudioApp) -> Bool {
+        var s = states[app.id] ?? State()
+        s.outputDeviceUID = uid
+        states[app.id] = s
+
+        // 既定出力へ戻した上に音量も原音なら、タップは不要なので畳む。
+        if !s.isCustomized, taps[app.id] != nil, duckMultiplier >= 1.0 {
+            if let tap = taps.removeValue(forKey: app.id) {
+                tap.invalidate()
+                retireIfNeeded(tap)
+            }
+            return true
+        }
+        return apply(s, for: app)
+    }
+
+    // MARK: - Ducking
+
+    /// ダッキングの適用状態を更新する。
+    /// - Parameters:
+    ///   - multiplier: 1.0 で解除。0.2 なら 20% まで絞る。
+    ///   - excludedIDs: 対象外にするアプリ（通話アプリ自身）。
+    ///   - apps: 現在のアプリ一覧（タップを張る対象の判定に使う）。
+    func setDucking(multiplier: Float, excludedIDs: Set<String>, apps: [AudioApp]) {
+        let changed = (multiplier != duckMultiplier) || (excludedIDs != duckExcludedIDs)
+        duckMultiplier = max(0.0, min(1.0, multiplier))
+        duckExcludedIDs = excludedIDs
+        guard changed else { return }
+
+        for app in apps {
+            let state = states[app.id] ?? State()
+            let beingDucked = duckMultiplier < 1.0 && !duckExcludedIDs.contains(app.id)
+
+            if beingDucked && app.isRunningOutput {
+                // 絞るにはタップが要る。ゲインの適用は IOProc 側でフェードする。
+                apply(state, for: app)
+            } else if let tap = taps[app.id] {
+                // 解除。設定が無ければ後で解放されるが、まず音量を戻す。
+                tap.gain = targetGain(for: app.id)
+            }
+        }
+    }
+
     /// 永続化した状態を復元する（デフォルトと異なる場合のみタップを張る）。
     func restore(_ state: State, for app: AudioApp) {
         states[app.id] = state
@@ -99,8 +161,11 @@ final class MixerController {
     /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
     func syncTaps(with apps: [AudioApp]) {
         for app in apps {
-            // 設定を変えていないアプリにタップは要らない。
-            guard let state = states[app.id], state.effectiveGain < 0.999 else { continue }
+            // 設定も無くダッキング対象でもないアプリにタップは要らない。
+            let state = states[app.id] ?? State()
+            let beingDucked = duckMultiplier < 1.0
+                && !duckExcludedIDs.contains(app.id) && app.isRunningOutput
+            guard state.isCustomized || beingDucked else { continue }
             apply(state, for: app)
         }
     }
@@ -113,7 +178,14 @@ final class MixerController {
     func releaseMeteringOnlyTaps() {
         retryPendingTeardown()
 
-        let releasable = taps.keys.filter { (states[$0] ?? State()).effectiveGain >= 0.999 }
+        // 音量も出力先も既定のままで、いまダッキングもしていないタップだけを解放する。
+        // ルーティング中のアプリはタップを外すと元のデバイスへ戻ってしまうし、
+        // ダッキング中のアプリはタップを外すと音量が戻ってしまう。
+        let releasable = taps.keys.filter { id in
+            guard !(states[id] ?? State()).isCustomized else { return false }
+            let beingDucked = duckMultiplier < 1.0 && !duckExcludedIDs.contains(id)
+            return !beingDucked
+        }
         guard let id = releasable.first else {
             draining = false
             return
@@ -168,14 +240,16 @@ final class MixerController {
     /// 音量設定を反映する。要求どおりの状態にできたら true。
     @discardableResult
     private func apply(_ state: State, for app: AudioApp) -> Bool {
-        let gain = state.effectiveGain
+        let gain = targetGain(for: app.id)
 
         if let tap = taps[app.id] {
             // 同じアプリでも、再起動や新しい音声ヘルパー（ブラウザの新規タブ等）で
             // プロセスオブジェクトが入れ替わる。その場合は張り直さないと、
             // 死んだ ID をタップしたままになり新しい音声に効かなくなる。
             // 列挙順は保証されないため集合で比較する。
-            if Set(tap.processObjectIDs) == Set(app.processObjectIDs) {
+            // 出力先を変えた場合も集約デバイスごと作り直しになる。
+            if Set(tap.processObjectIDs) == Set(app.processObjectIDs),
+               tap.outputDeviceUID == state.outputDeviceUID {
                 // 100% でもタップは張ったままにする（素通し）。スライダーを
                 // 100% 付近で往復するたびに集約デバイスを作り直すと、その
                 // デバイスで再生中の全アプリが音飛びするため。
@@ -196,12 +270,20 @@ final class MixerController {
             return false
         }
 
-        // タップが無く、原音のままでよいなら何もしない。
-        if gain >= 0.999 { return true }
+        // タップが無く、原音のまま既定出力でよいなら何もしない。
+        if gain >= 0.999 && state.outputDeviceUID == nil { return true }
 
         guard let tap = makeTap(for: app, gain: gain) else { return false }
         taps[app.id] = tap
         return true
+    }
+
+    /// 現在の設定に一致するタップが張られているか。
+    /// 古い（ヘルパーや出力先が変わった）タップは「無し」と同じ扱いにする。
+    func hasFreshTap(for app: AudioApp) -> Bool {
+        guard let tap = taps[app.id] else { return false }
+        return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
+            && tap.outputDeviceUID == (states[app.id] ?? State()).outputDeviceUID
     }
 
     /// メーター表示のためにタップを用意する（音量は変えない）。
@@ -209,21 +291,14 @@ final class MixerController {
     /// 再生中のアプリには原音のままタップを張る。
     /// 集約デバイスの生成は一度に一つだけ行い、まとめて作らない
     /// （連続して作るとそのデバイス上の全再生が音飛びする）。
-    /// 現在のプロセス構成に一致するタップが張られているか。
-    /// 古い（ヘルパーが入れ替わった）タップは「無し」と同じ扱いにする。
-    func hasFreshTap(for app: AudioApp) -> Bool {
-        guard let tap = taps[app.id] else { return false }
-        return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
-    }
-
     @discardableResult
     func ensureMeteringTap(for app: AudioApp) -> Bool {
         cancelMeteringRelease()
-        let gain = (states[app.id] ?? State()).effectiveGain
+        let gain = targetGain(for: app.id)
 
         if let tap = taps[app.id] {
-            if Set(tap.processObjectIDs) == Set(app.processObjectIDs) { return true }
-            // ヘルパーが入れ替わったタップは計測できない（メーターが 0 のまま）。
+            if hasFreshTap(for: app) { return true }
+            // ヘルパーや出力先が変わったタップは作り直す。
             // 新しい方を起動してから古い方を破棄する。
             guard let replacement = makeTap(for: app, gain: gain) else { return false }
             tap.invalidate()
@@ -238,7 +313,12 @@ final class MixerController {
     }
 
     private func makeTap(for app: AudioApp, gain: Float) -> ProcessTap? {
-        let tap = ProcessTap(processObjectIDs: app.processObjectIDs)
+        let tap = ProcessTap(
+            processObjectIDs: app.processObjectIDs,
+            outputDeviceUID: (states[app.id] ?? State()).outputDeviceUID
+        )
+        // 新しいタップは目標ゲインから始める（開始時にフェードさせない）。
+        tap.state.currentGain = gain
         tap.gain = gain
         do {
             try tap.activate()
@@ -319,7 +399,10 @@ final class MixerController {
 
         let snapshot = taps
         for (id, oldTap) in snapshot {
+            // 出力先を明示しているタップは既定出力の変更と無関係。
+            guard oldTap.followsDefaultOutput else { continue }
             let newTap = ProcessTap(processObjectIDs: oldTap.processObjectIDs)
+            newTap.state.currentGain = oldTap.gain
             newTap.gain = oldTap.gain
             do {
                 // 新しい出力先のタップを起動してから古い方を落とす。

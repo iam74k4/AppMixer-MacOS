@@ -12,6 +12,9 @@ struct ContentView: View {
     // カウントダウンが振り出しに戻って更新間隔が乱れる。
     @State private var ticker = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
+    /// 設定セクションを開いているか。
+    @State private var showSettings = false
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -27,10 +30,23 @@ struct ContentView: View {
             searchBar
             Divider()
             appList
-            Divider()
-            launchAtLoginSection
+
+            if model.duckingReason != nil {
+                Divider()
+                duckingBanner
+            }
+
             Divider()
             footer
+
+            // 設定は既定で畳んでおく。常に開いていると縦に長くなり、
+            // 主役であるアプリ一覧が埋もれてしまう。
+            if showSettings {
+                Divider()
+                duckingSection
+                Divider()
+                launchAtLoginSection
+            }
         }
         .frame(width: 420)
         .onAppear { model.onAppear() }
@@ -163,6 +179,62 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - 自動ダッキング
+
+    /// 発動中だけ出す帯。設定を畳んでいても、いま絞られている理由が分かるようにする。
+    private var duckingBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "waveform.badge.mic")
+            Text("\(model.duckingReason ?? "") のため音量を下げています")
+                .lineLimit(1)
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(Color.orange)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+    }
+
+    private var duckingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("通話中は自動で音量を下げる", isOn: Binding(
+                get: { model.duckingEnabled },
+                set: { model.setDuckingEnabled($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.callout)
+
+            if model.duckingEnabled {
+                HStack(spacing: 8) {
+                    Text("下げる音量")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: { Double(model.duckLevel) },
+                            set: { model.setDuckLevel(Float($0)) }
+                        ),
+                        in: 0...1
+                    )
+                    Text("\(Int((model.duckLevel * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+
+                Toggle("マイクの使用も引き金にする", isOn: Binding(
+                    get: { model.duckOnMicrophone },
+                    set: { model.setDuckOnMicrophone($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
     // MARK: - Launch at login
 
     private var launchAtLoginSection: some View {
@@ -203,6 +275,14 @@ struct ContentView: View {
             .buttonStyle(.borderless)
 
             Spacer()
+
+            Button {
+                showSettings.toggle()
+            } label: {
+                Label("設定", systemImage: showSettings ? "chevron.down" : "gearshape")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
 
             Button {
                 model.quit()
