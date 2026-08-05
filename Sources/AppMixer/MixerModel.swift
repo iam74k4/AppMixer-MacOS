@@ -94,6 +94,12 @@ final class MixerModel: ObservableObject {
             MainActor.assumeIsolated { guard let self else { return }; self.applyMemoryForCurrentDevice() }
         }
 
+        // 振り分け先のデバイスが抜かれたら既定出力へ戻す。
+        // 放置するとそのアプリは音の出口を失って無音のままになる。
+        controller.onDeviceListChanged = { [weak self] in
+            MainActor.assumeIsolated { guard let self else { return }; self.repairMissingRoutes() }
+        }
+
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
         // 後始末をせずに終了するとそのアプリが無音のままになる。
         terminationObserver = NotificationCenter.default.addObserver(
@@ -220,7 +226,8 @@ final class MixerModel: ObservableObject {
                 metered: controller.hasFreshTap(for: app),
                 failed: previouslyFailed.contains(app.id),
                 outputDeviceUID: state.outputDeviceUID,
-                ducked: duckingReason != nil && !DuckingDetector.isCommunicationApp(app)
+                ducked: duckingReason != nil && app.isRunningOutput
+                    && !DuckingDetector.isCommunicationApp(app)
             )
         }
         outputDevices = AudioDeviceEnumerator.outputDevices()
@@ -238,6 +245,9 @@ final class MixerModel: ObservableObject {
     /// その場で記憶する。既定値（100%）に戻してしまうと、ヘッドフォンを挿した
     /// 瞬間に音量が跳ね上がることになるため。
     private func applyMemoryForCurrentDevice() {
+        // UID が読めないうちは記憶を入れ替えない。誤ったキーで読み書きすると
+        // 別デバイスの設定を上書きしてしまう。
+        guard let deviceUID = currentDefaultDeviceUID else { return }
         let enumerated = AudioAppEnumerator.enumerate()
 
         for app in enumerated {
@@ -245,30 +255,39 @@ final class MixerModel: ObservableObject {
             guard controller.state(forID: app.id).outputDeviceUID == nil else { continue }
 
             let stored = storedSettings(for: app)
-            guard let remembered = stored.perDevice[currentDefaultDeviceUID] else {
+            guard let remembered = stored.perDevice[deviceUID] else {
                 // このデバイスの記憶が無い。いまの音量を引き継いで覚える。
                 if controller.states[app.id] != nil { saveSetting(for: app) }
                 continue
             }
 
-            // 記憶があっても、鳴っていないアプリにタップは要らない。
-            // ここで一斉にタップを張ると集約デバイスがまとめて作られ、
-            // そのデバイスで再生中の音がすべて飛ぶ。鳴り始めた時点で
-            // refresh() 側が復元するので、状態だけ入れておけばよい。
-            guard app.isRunningOutput || controller.hasTap(forID: app.id) else {
-                continue
-            }
-
-            controller.restore(
-                MixerController.State(
-                    volume: remembered.volume,
-                    muted: remembered.muted,
-                    outputDeviceUID: nil
-                ),
-                for: app
+            let state = MixerController.State(
+                volume: remembered.volume,
+                muted: remembered.muted,
+                outputDeviceUID: nil
             )
+
+            // 鳴っていないアプリにタップは要らない。ここで一斉に張ると
+            // 集約デバイスがまとめて作られ、そのデバイスで再生中の音が
+            // すべて飛ぶ。状態だけ入れておけば、鳴り始めた時点で反映される。
+            if app.isRunningOutput || controller.hasTap(forID: app.id) {
+                controller.restore(state, for: app)
+            } else {
+                controller.seed(state, for: app)
+            }
         }
 
+        refresh(with: enumerated)
+    }
+
+    /// 振り分け先が無くなったアプリを既定出力へ戻し、保存内容も直す。
+    private func repairMissingRoutes() {
+        let enumerated = AudioAppEnumerator.enumerate()
+        let repaired = controller.repairMissingRoutes(apps: enumerated)
+        guard !repaired.isEmpty else { return }
+        for app in enumerated where repaired.contains(app.id) {
+            saveSetting(for: app)
+        }
         refresh(with: enumerated)
     }
 
@@ -289,15 +308,18 @@ final class MixerModel: ObservableObject {
         // 覚えている音量があればそちらへ入れ替える（無ければ今の値を覚える）。
         let stored = storedSettings(for: app)
         let device = uid ?? currentDefaultDeviceUID
-        if let remembered = stored.perDevice[device] {
+        if ok, let device, let remembered = stored.perDevice[device] {
             ok = controller.setVolume(remembered.volume, for: app) && ok
             ok = controller.setMuted(remembered.muted, for: app) && ok
         }
-        saveSetting(for: app)
+        // 切り替えに失敗したら保存しない。コントローラ側は状態を元へ戻すので、
+        // ここで書き込むと実際の出力先と保存内容が食い違う。
+        if ok { saveSetting(for: app) }
 
         let state = controller.state(forID: app.id)
         updateRow(app.id) {
-            $0.outputDeviceUID = uid
+            // 要求した値ではなく、実際に通った値を表示する。
+            $0.outputDeviceUID = state.outputDeviceUID
             $0.volume = state.volume
             $0.muted = state.muted
             $0.metered = controller.hasFreshTap(for: app)
@@ -361,7 +383,10 @@ final class MixerModel: ObservableObject {
         }
 
         let all = AudioAppEnumerator.enumerate()
-        let reason = DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
+        // 100% まで絞る＝何も起きない。発動中と表示すると嘘になる。
+        let reason = duckLevel < 0.999
+            ? DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
+            : nil
 
         if reason != duckingReason {
             duckingReason = reason
@@ -382,9 +407,14 @@ final class MixerModel: ObservableObject {
         )
         for index in apps.indices {
             let isExcluded = excluded.contains(apps[index].id)
-            apps[index].ducked = active && !isExcluded
+            apps[index].ducked = active && !isExcluded && apps[index].app.isRunningOutput
             apps[index].metered = controller.hasFreshTap(for: apps[index].app)
         }
+
+        // 絞るために張ったタップを解放する。ダッキングはポップオーバーを
+        // 閉じていても動くため、ここで片付けないと通話が終わったあとも
+        // 全アプリの音声が AppMixer 経由のまま残り続ける。
+        if !active { controller.releaseMeteringOnlyTaps() }
     }
 
     // MARK: - Launch at login
@@ -629,6 +659,10 @@ final class MixerModel: ObservableObject {
         var outputDeviceUID: String?
         /// 出力デバイス UID -> 音量設定。
         var perDevice: [String: DeviceVolume] = [:]
+        /// 最後に使った音量。まだ記憶の無いデバイスへ移ったときの引き継ぎ元。
+        /// これが無いと、鳴っていない間にデバイスが変わったアプリだけ
+        /// 100% で鳴り出してしまう（鳴っていた場合は引き継がれるのに）。
+        var lastKnown: DeviceVolume?
     }
 
     /// 旧形式（デバイスを区別しなかった頃）の保存内容。読み込み時の移行にだけ使う。
@@ -644,13 +678,16 @@ final class MixerModel: ObservableObject {
 
     /// いまそのアプリの音が出ているデバイスの UID。
     /// 振り分けていればその先、していなければ既定出力。
-    private func deviceKey(for app: AudioApp) -> String {
+    private func deviceKey(for app: AudioApp) -> String? {
         if let routed = controller.state(forID: app.id).outputDeviceUID { return routed }
         return currentDefaultDeviceUID
     }
 
-    private var currentDefaultDeviceUID: String {
-        CoreAudioObject.deviceUID(CoreAudioObject.defaultOutputDeviceID()) ?? "default"
+    /// いまの既定出力デバイスの UID。読めなければ nil。
+    /// 読めないときに固定の代用キーへ書くと、別々のデバイスの記憶が
+    /// 1 つに混ざったうえ、UID が読めるようになった途端に行方不明になる。
+    private var currentDefaultDeviceUID: String? {
+        CoreAudioObject.deviceUID(CoreAudioObject.defaultOutputDeviceID())
     }
 
     private func storedSettings(for app: AudioApp) -> StoredSettings {
@@ -663,8 +700,11 @@ final class MixerModel: ObservableObject {
         // 旧形式は、そのときの既定デバイスの設定だったものとして引き継ぐ。
         if let legacy = try? JSONDecoder().decode(LegacySetting.self, from: data) {
             var migrated = StoredSettings(outputDeviceUID: legacy.outputDeviceUID)
-            let device = legacy.outputDeviceUID ?? currentDefaultDeviceUID
-            migrated.perDevice[device] = DeviceVolume(volume: legacy.volume, muted: legacy.muted)
+            let volume = DeviceVolume(volume: legacy.volume, muted: legacy.muted)
+            if let device = legacy.outputDeviceUID ?? currentDefaultDeviceUID {
+                migrated.perDevice[device] = volume
+            }
+            migrated.lastKnown = volume
             return migrated
         }
         return StoredSettings()
@@ -675,9 +715,11 @@ final class MixerModel: ObservableObject {
         let state = controller.state(forID: app.id)
         var stored = storedSettings(for: app)
         stored.outputDeviceUID = state.outputDeviceUID
-        stored.perDevice[deviceKey(for: app)] = DeviceVolume(
-            volume: state.volume, muted: state.muted
-        )
+        let volume = DeviceVolume(volume: state.volume, muted: state.muted)
+        // デバイスの UID が読めないときは、そのデバイスぶんの記憶は書かない。
+        // 代用キーへ書くと別デバイスの記憶と混ざってしまう。
+        if let key = deviceKey(for: app) { stored.perDevice[key] = volume }
+        stored.lastKnown = volume
         if let data = try? JSONEncoder().encode(stored) {
             defaults.set(data, forKey: key)
         }
@@ -687,9 +729,11 @@ final class MixerModel: ObservableObject {
         guard storageKey(for: app) != nil else { return nil }
         let stored = storedSettings(for: app)
         // 振り分け先が決まっているなら、その先のデバイスの音量を読む。
-        let device = stored.outputDeviceUID ?? currentDefaultDeviceUID
-        guard let saved = stored.perDevice[device] else {
-            // このデバイスの記憶が無い場合、振り分けだけ復元して音量は既定にする。
+        let device = stored.outputDeviceUID ?? currentDefaultDeviceUID ?? ""
+        // このデバイスの記憶が無ければ、最後に使っていた音量を引き継ぐ。
+        // 既定（100%）に落とすと、鳴っていない間にヘッドフォンへ切り替わった
+        // アプリだけが次に鳴った瞬間に爆音になる。
+        guard let saved = stored.perDevice[device] ?? stored.lastKnown else {
             guard stored.outputDeviceUID != nil else { return nil }
             return MixerController.State(outputDeviceUID: stored.outputDeviceUID)
         }

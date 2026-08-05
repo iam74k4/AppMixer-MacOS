@@ -44,6 +44,8 @@ final class MixerController {
     private var draining = false
     private var deviceListenerInstalled = false
     private var deviceListenerBlock: AudioObjectPropertyListenerBlock?
+    /// 直前の既定出力デバイス。同じデバイスでの通知を無視するために持つ。
+    private var lastDefaultDeviceID: AudioObjectID = .unknown
 
     /// マスター音量/ミュートが外部（F11/F12 やシステム設定）で変わったときに呼ばれる。
     var onMasterChanged: (() -> Void)?
@@ -54,16 +56,25 @@ final class MixerController {
     /// 既定出力デバイスが切り替わったときに呼ばれる（タップの張り直しは済んでいる）。
     var onDefaultDeviceChanged: (() -> Void)?
 
+    /// 接続されているデバイスの構成が変わったときに呼ばれる。
+    var onDeviceListChanged: (() -> Void)?
+
+    /// いま存在する出力デバイスの UID。振り分け先が生きているかの判定に使う。
+    private var liveDeviceUIDs: Set<String> = []
+
     init() {
+        refreshLiveDeviceUIDs()
         installDefaultDeviceListener()
         installMasterListeners()
         installProcessListListener()
+        installDeviceListListener()
     }
 
     deinit {
         removeDefaultDeviceListener()
         removeMasterListeners()
         removeProcessListListener()
+        removeDeviceListListener()
         for tap in taps.values { tap.invalidate() }
         taps.removeAll()
     }
@@ -103,6 +114,7 @@ final class MixerController {
     /// 出力先デバイスを設定する（nil で既定出力に戻す）。
     @discardableResult
     func setOutputDevice(_ uid: String?, for app: AudioApp) -> Bool {
+        let previous = states[app.id]?.outputDeviceUID
         var s = states[app.id] ?? State()
         s.outputDeviceUID = uid
         states[app.id] = s
@@ -115,7 +127,17 @@ final class MixerController {
             }
             return true
         }
-        return apply(s, for: app)
+
+        let ok = apply(s, for: app)
+        if !ok {
+            // 切り替えに失敗したら音は元のデバイスから出続ける。状態だけ
+            // 新しい先に書き換えると、表示・保存・以降の音量記憶がすべて
+            // 実際と食い違うため、元に戻す。
+            var reverted = states[app.id] ?? State()
+            reverted.outputDeviceUID = previous
+            states[app.id] = reverted
+        }
+        return ok
     }
 
     // MARK: - Ducking
@@ -221,6 +243,9 @@ final class MixerController {
             tap.invalidate()
             // 一度で破棄できないことがあるため、その場で再試行する。
             if !tap.isFullyTornDown { tap.invalidate() }
+            // それでも駄目なら再試行リストへ。ここで手放すと、終了が
+            // 中断された場合に対象アプリが無音のまま記録も残らない。
+            retireIfNeeded(tap)
         }
         taps.removeAll()
         retryPendingTeardown()
@@ -285,8 +310,38 @@ final class MixerController {
     /// 古い（ヘルパーや出力先が変わった）タップは「無し」と同じ扱いにする。
     func hasFreshTap(for app: AudioApp) -> Bool {
         guard let tap = taps[app.id] else { return false }
+        // 振り分け先が引き抜かれたタップは「生きている」と見なさない。
+        // 死んだデバイスを指したままだと、対象アプリは .mutedWhenTapped で
+        // 無音のまま取り残され、張り直す経路も塞がってしまう。
+        if let uid = tap.outputDeviceUID, !liveDeviceUIDs.contains(uid) { return false }
         return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
             && tap.outputDeviceUID == (states[app.id] ?? State()).outputDeviceUID
+    }
+
+    /// 振り分け先が無くなったアプリを既定出力へ戻す。戻したアプリの id を返す。
+    @discardableResult
+    func repairMissingRoutes(apps: [AudioApp]) -> [String] {
+        refreshLiveDeviceUIDs()
+        var repaired: [String] = []
+        for app in apps {
+            guard let uid = states[app.id]?.outputDeviceUID,
+                  !liveDeviceUIDs.contains(uid) else { continue }
+            var s = states[app.id] ?? State()
+            s.outputDeviceUID = nil
+            states[app.id] = s
+            apply(s, for: app)
+            repaired.append(app.id)
+        }
+        return repaired
+    }
+
+    private func refreshLiveDeviceUIDs() {
+        liveDeviceUIDs = Set(AudioDeviceEnumerator.outputDevices().map(\.uid))
+    }
+
+    /// タップを張らずに状態だけ入れる（鳴っていないアプリ用）。
+    func seed(_ state: State, for app: AudioApp) {
+        states[app.id] = state
     }
 
     /// メーター表示のためにタップを用意する（音量は変えない）。
@@ -430,8 +485,14 @@ final class MixerController {
 
     private func installDefaultDeviceListener() {
         guard !deviceListenerInstalled else { return }
+        lastDefaultDeviceID = CoreAudioObject.defaultOutputDeviceID()
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
+            // 同じデバイスのまま通知が来ることがある。毎回作り直すと、
+            // そのたびに全タップの破棄と生成が走って音が飛ぶ。
+            let current = CoreAudioObject.defaultOutputDeviceID()
+            guard current != self.lastDefaultDeviceID else { return }
+            self.lastDefaultDeviceID = current
             self.rebuildActiveTaps()
             // 出力先が変わると「そのデバイスでの音量」も変わるため、
             // 張り直したあとに呼び出し側へ知らせる。
@@ -540,6 +601,39 @@ final class MixerController {
         ) == noErr {
             processListBlock = block
         }
+    }
+
+    // MARK: - Device list listener
+    //
+    // 振り分け先のデバイスが引き抜かれたことを知る唯一の手段。
+    // これが無いと、そのアプリはタップされたまま音の出口を失い無音になる。
+
+    private var deviceListAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDevices,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    private var deviceListBlock: AudioObjectPropertyListenerBlock?
+
+    private func installDeviceListListener() {
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            self.refreshLiveDeviceUIDs()
+            self.onDeviceListChanged?()
+        }
+        if AudioObjectAddPropertyListenerBlock(
+            .system, &deviceListAddress, DispatchQueue.main, block
+        ) == noErr {
+            deviceListBlock = block
+        }
+    }
+
+    private func removeDeviceListListener() {
+        guard let block = deviceListBlock else { return }
+        AudioObjectRemovePropertyListenerBlock(
+            .system, &deviceListAddress, DispatchQueue.main, block
+        )
+        deviceListBlock = nil
     }
 
     private func removeProcessListListener() {
