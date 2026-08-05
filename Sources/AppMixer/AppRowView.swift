@@ -8,65 +8,88 @@ struct AppRowView: View {
     private var app: AudioApp { display.app }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             icon
 
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Text(app.name)
-                        .font(.callout).fontWeight(.medium)
-                        .lineLimit(1)
-                    if display.failed {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                            .help("設定を適用できませんでした。実際の音は変わっていません。")
-                    } else if display.ducked {
-                        Text("自動で音量を下げ中")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                    } else if !app.isRunningOutput {
-                        Text("停止中")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(display.muted ? "—" : "\(Int((display.volume * 100).rounded()))%")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        model.setMuted(!display.muted, for: app)
-                    } label: {
-                        Image(systemName: display.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .frame(width: 16)
-                    }
-                    .buttonStyle(.borderless)
-
-                    Slider(
-                        value: Binding(
-                            get: { Double(display.volume) },
-                            set: { model.setVolume(Float($0), for: app) }
-                        ),
-                        in: 0...1
-                    )
-                    .disabled(display.muted)
-                }
-
-                // 再生中は常にメーターの場所を確保する。タップが張られるまでは
-                // 空のバーを出しておき、レベルが乗った時点で伸びる。
-                if display.app.isRunningOutput {
-                    meterBar
-                }
-
-                outputPicker
+                titleLine
+                controlLine
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
+        .opacity(app.isRunningOutput ? 1.0 : 0.55)
     }
+
+    // MARK: - 1 段目: 名前・状態・音量値・出力先
+
+    private var titleLine: some View {
+        HStack(spacing: 6) {
+            Text(app.name)
+                .font(.callout).fontWeight(.medium)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            statusBadge
+
+            Spacer(minLength: 6)
+
+            outputMenu
+
+            Text(display.muted ? "ミュート" : "\(Int((display.volume * 100).rounded()))%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(display.muted ? Color.secondary : Color.primary)
+                .frame(width: 52, alignment: .trailing)
+        }
+    }
+
+    @ViewBuilder
+    private var statusBadge: some View {
+        if display.failed {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(Color.orange)
+                .help("設定を適用できませんでした。実際の音は変わっていません。")
+        } else if display.ducked {
+            Image(systemName: "arrow.down.right.circle.fill")
+                .font(.caption2)
+                .foregroundStyle(Color.orange)
+                .help("通話中のため自動で音量を下げています")
+        }
+    }
+
+    // MARK: - 2 段目: ミュート + スライダー（直下にメーター）
+
+    private var controlLine: some View {
+        HStack(spacing: 8) {
+            Button {
+                model.setMuted(!display.muted, for: app)
+            } label: {
+                Image(systemName: display.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .frame(width: 16)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(display.muted ? Color.secondary : Color.primary)
+
+            // スライダーとメーターを同じ幅・同じ開始位置に揃えると、
+            // メーターが「そのスライダーのレベル」として読める。
+            VStack(alignment: .leading, spacing: 3) {
+                Slider(
+                    value: Binding(
+                        get: { Double(display.volume) },
+                        set: { model.setVolume(Float($0), for: app) }
+                    ),
+                    in: 0...1
+                )
+                .controlSize(.small)
+                .disabled(display.muted)
+
+                meterBar
+            }
+        }
+    }
+
+    // MARK: - Parts
 
     private var icon: some View {
         Group {
@@ -78,53 +101,54 @@ struct AppRowView: View {
                 Image(systemName: "app.dashed")
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
             }
         }
-        .frame(width: 32, height: 32)
+        .frame(width: 30, height: 30)
     }
 
-    /// このアプリだけの出力先を選ぶ。既定はシステムの出力に追従。
-    private var outputPicker: some View {
-        HStack(spacing: 6) {
-            Image(systemName: display.outputDeviceUID == nil
-                  ? "hifispeaker" : "hifispeaker.fill")
-                .font(.caption2)
-                // 両辺の型を Color に揃える。.secondary と .tint は別の
-                // ShapeStyle 型なので、三項演算子では単一の型に解決できない。
-                .foregroundStyle(display.outputDeviceUID == nil ? Color.secondary : Color.accentColor)
-
-            Menu {
-                Button {
-                    model.setOutputDevice(nil, for: app)
-                } label: {
-                    if display.outputDeviceUID == nil {
-                        Label("既定の出力", systemImage: "checkmark")
-                    } else {
-                        Text("既定の出力")
-                    }
-                }
-                Divider()
-                ForEach(model.outputDevices) { device in
-                    Button {
-                        model.setOutputDevice(device.uid, for: app)
-                    } label: {
-                        if display.outputDeviceUID == device.uid {
-                            Label(device.name, systemImage: "checkmark")
-                        } else {
-                            Text(device.name)
-                        }
-                    }
-                }
+    /// 出力先の選択。既定のままならアイコンだけの控えめな表示にして、
+    /// 別デバイスへ振っているときだけデバイス名を出す。
+    private var outputMenu: some View {
+        Menu {
+            Button {
+                model.setOutputDevice(nil, for: app)
             } label: {
-                Text(model.outputDeviceName(display.outputDeviceUID))
-                    .font(.caption2)
-                    .lineLimit(1)
+                if display.outputDeviceUID == nil {
+                    Label("既定の出力", systemImage: "checkmark")
+                } else {
+                    Text("既定の出力")
+                }
             }
-            .menuStyle(.button)
-            .buttonStyle(.borderless)
-            .fixedSize()
+            Divider()
+            ForEach(model.outputDevices) { device in
+                Button {
+                    model.setOutputDevice(device.uid, for: app)
+                } label: {
+                    if display.outputDeviceUID == device.uid {
+                        Label(device.name, systemImage: "checkmark")
+                    } else {
+                        Text(device.name)
+                    }
+                }
+            }
+        } label: {
+            if display.outputDeviceUID == nil {
+                Image(systemName: "hifispeaker")
+            } else {
+                HStack(spacing: 3) {
+                    Image(systemName: "hifispeaker.fill")
+                    Text(model.outputDeviceName(display.outputDeviceUID))
+                        .lineLimit(1)
+                }
+            }
         }
+        .menuStyle(.button)
+        .buttonStyle(.borderless)
+        .fixedSize()
+        .font(.caption)
+        .foregroundStyle(display.outputDeviceUID == nil ? Color.secondary : Color.accentColor)
+        .help("このアプリの出力先を選ぶ")
     }
 
     private var meterBar: some View {
@@ -137,7 +161,8 @@ struct AppRowView: View {
                     .animation(.linear(duration: 0.05), value: display.level)
             }
         }
-        .frame(height: 6)
+        .frame(height: 4)
+        .opacity(app.isRunningOutput ? 1 : 0)
     }
 
     private var meterColor: Color {
