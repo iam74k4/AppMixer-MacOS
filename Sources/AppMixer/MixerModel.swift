@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import CoreAudio
 
 // SwiftUI とオーディオエンジン(MixerController)を仲介する ObservableObject。
 // アプリ一覧・マスター音量・検索・権限・メーターを @Published で公開する。
