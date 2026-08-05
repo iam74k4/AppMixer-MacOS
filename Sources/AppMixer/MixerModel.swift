@@ -80,13 +80,13 @@ final class MixerModel: ObservableObject {
         // 値だけを読み直す軽い経路にする。対応可否やデバイス名の再取得まで
         // 走らせると、キーリピート中に HAL 呼び出しが大量に発生する。
         controller.onMasterChanged = { [weak self] in
-            MainActor.assumeIsolated { self?.syncMasterValues() }
+            MainActor.assumeIsolated { guard let self else { return }; self.syncMasterValues() }
         }
 
         // 音声プロセスの増減に追従する。ポップオーバーを開いていなくても、
         // 再起動したアプリや新しい音声ヘルパーにタップを張り直す必要がある。
         controller.onProcessListChanged = { [weak self] in
-            MainActor.assumeIsolated { self?.scheduleProcessResync() }
+            MainActor.assumeIsolated { guard let self else { return }; self.scheduleProcessResync() }
         }
 
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
@@ -96,7 +96,7 @@ final class MixerModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.controller.shutdown() }
+            MainActor.assumeIsolated { guard let self else { return }; self.controller.shutdown() }
         }
 
         startIdleWatchdog()
@@ -411,7 +411,7 @@ final class MixerModel: ObservableObject {
     private func scheduleProcessResync() {
         processResyncWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated { guard let self else { return }; self.refresh() }
         }
         processResyncWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)

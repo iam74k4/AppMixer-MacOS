@@ -90,7 +90,9 @@ struct AppRowView: View {
             Image(systemName: display.outputDeviceUID == nil
                   ? "hifispeaker" : "hifispeaker.fill")
                 .font(.caption2)
-                .foregroundStyle(display.outputDeviceUID == nil ? .secondary : .tint)
+                // 両辺の型を Color に揃える。.secondary と .tint は別の
+                // ShapeStyle 型なので、三項演算子では単一の型に解決できない。
+                .foregroundStyle(display.outputDeviceUID == nil ? Color.secondary : Color.accentColor)
 
             Menu {
                 Button {
@@ -119,7 +121,8 @@ struct AppRowView: View {
                     .font(.caption2)
                     .lineLimit(1)
             }
-            .menuStyle(.borderlessButton)
+            .menuStyle(.button)
+            .buttonStyle(.borderless)
             .fixedSize()
         }
     }
