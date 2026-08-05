@@ -32,6 +32,10 @@ final class MixerModel: ObservableObject {
 
     @Published var permission: AudioCapturePermission.Status = .notDetermined
 
+    @Published var launchAtLogin: Bool = false
+    /// 自動起動の切り替えに失敗した理由（成功時は nil）。
+    @Published var launchAtLoginProblem: String?
+
     private let controller = MixerController()
     private let defaults = UserDefaults.standard
     private var terminationObserver: NSObjectProtocol?
@@ -181,6 +185,37 @@ final class MixerModel: ObservableObject {
 
         refreshMaster()
         permission = AudioCapturePermission.current()
+        refreshLaunchAtLogin()
+    }
+
+    // MARK: - Launch at login
+
+    func refreshLaunchAtLogin() {
+        let state = LaunchAtLogin.state
+        let enabled = (state == .enabled)
+        if launchAtLogin != enabled { launchAtLogin = enabled }
+
+        let problem: String?
+        switch state {
+        case .requiresApproval:
+            problem = "システム設定のログイン項目で許可してください"
+        case .notFound:
+            problem = "アプリの場所が変わりました。一度オフにして入れ直してください"
+        case .enabled, .disabled:
+            problem = nil
+        }
+        if launchAtLoginProblem != problem { launchAtLoginProblem = problem }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin = enabled
+        launchAtLoginProblem = LaunchAtLogin.setEnabled(enabled)
+        // 実際に登録できたかは OS 側の状態で確認する。
+        refreshLaunchAtLogin()
+    }
+
+    func openLoginItemsSettings() {
+        LaunchAtLogin.openSettings()
     }
 
     /// メーターがまだ出ていない再生中のアプリを 1 つだけ拾ってタップを張る。

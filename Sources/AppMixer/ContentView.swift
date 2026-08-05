@@ -28,6 +28,8 @@ struct ContentView: View {
             Divider()
             appList
             Divider()
+            launchAtLoginSection
+            Divider()
             footer
         }
         .frame(width: 420)
@@ -159,6 +161,33 @@ struct ContentView: View {
                 .frame(maxHeight: 460)
             }
         }
+    }
+
+    // MARK: - Launch at login
+
+    private var launchAtLoginSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("ログイン時に起動", isOn: Binding(
+                get: { model.launchAtLogin },
+                set: { model.setLaunchAtLogin($0) }
+            ))
+            .toggleStyle(.checkbox)
+            .font(.callout)
+
+            if let problem = model.launchAtLoginProblem {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(problem)
+                        .foregroundStyle(.secondary)
+                    Button("設定を開く") { model.openLoginItemsSettings() }
+                        .buttonStyle(.link)
+                }
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Footer
