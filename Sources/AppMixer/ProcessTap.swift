@@ -51,6 +51,9 @@ final class ProcessTap {
         }
     }
 
+    /// ゲイン変化にかける時間。短すぎるとプチッと鳴り、長すぎると反応が鈍く感じる。
+    private static let rampSeconds = 0.08
+
     let processObjectIDs: [AudioObjectID]
 
     /// 出力先デバイスの UID。nil なら既定出力デバイスに追従する。
@@ -107,9 +110,14 @@ final class ProcessTap {
             throw TapError.unsupportedFormat(format)
         }
 
-        // フェード時間からサンプルあたりの変化量を決める（およそ 80ms）。
+        // フェード時間から 1 スロットあたりの変化量を決める（およそ 80ms）。
+        // render はバッファ内の Float を 1 つずつ辿るため、インターリーブ形式では
+        // 1 フレームにチャンネル数ぶんのスロットがある。これを勘定に入れないと
+        // ステレオでフェードが半分の時間で終わってしまう。
         let sampleRate = format.mSampleRate > 0 ? format.mSampleRate : 48_000
-        state.rampStep = Float(1.0 / (sampleRate * 0.08))
+        let isInterleaved = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+        let slotsPerFrame = isInterleaved ? max(1, Int(format.mChannelsPerFrame)) : 1
+        state.rampStep = Float(1.0 / (sampleRate * Self.rampSeconds * Double(slotsPerFrame)))
 
         // 出力先。指定が無ければ既定出力を使う。
         let outputUID: String
