@@ -15,6 +15,13 @@ struct ContentView: View {
     /// 設定セクションを開いているか。
     @State private var showSettings = false
 
+    /// アプリ一覧の中身の実寸。これに合わせて一覧の高さを変える。
+    @State private var listHeight: CGFloat = 0
+
+    /// 一覧の高さの下限と上限。上限を超えたぶんはスクロールする。
+    private static let minListHeight: CGFloat = 64
+    private static let maxListHeight: CGFloat = 460
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -165,7 +172,9 @@ struct ContentView: View {
                     .padding(.vertical, 24)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    // 遅延生成だと画面外の行が測れず高さが出ないため VStack を使う。
+                    // 一覧はせいぜい数十行なので実害はない。
+                    VStack(spacing: 0) {
                         ForEach(rows) { display in
                             AppRowView(model: model, display: display)
                             if display.id != rows.last?.id {
@@ -173,9 +182,31 @@ struct ContentView: View {
                             }
                         }
                     }
+                    .background(
+                        // 中身の実寸を測って、その高さにポップオーバーを合わせる。
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: ListHeightKey.self, value: geo.size.height
+                            )
+                        }
+                    )
                 }
-                .frame(maxHeight: 460)
+                // ScrollView は放っておくと与えられた高さいっぱいに広がるため、
+                // 再生中が 1 つでも余白が残ってしまう。中身の高さに合わせ、
+                // 増えすぎたときだけ上限で頭打ちにしてスクロールさせる。
+                .frame(height: min(max(listHeight, Self.minListHeight), Self.maxListHeight))
+                .onPreferenceChange(ListHeightKey.self) { height in
+                    listHeight = height
+                }
             }
+        }
+    }
+
+    /// 一覧の中身の実寸を親へ伝えるためのキー。
+    private struct ListHeightKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
         }
     }
 
