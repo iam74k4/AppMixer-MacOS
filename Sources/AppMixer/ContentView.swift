@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Combine
 
@@ -39,15 +40,20 @@ struct ContentView: View {
                 duckingBanner
             }
 
-            // 設定はフッターより上に開く。下に開くと「終了」より後ろに
-            // 設定が現れて、並びが逆さまに見える。
-            if showSettings {
-                Divider()
-                settingsSection
-            }
+            // Group でまとめて、外側の VStack が受け取る要素数に余裕を残す。
+            // ViewBuilder は 10 個までしか受け取れず、上限に張り付いていると
+            // 次に 1 行足したときに分かりにくいコンパイルエラーになる。
+            Group {
+                // 設定はフッターより上に開く。下に開くと「終了」より後ろに
+                // 設定が現れて、並びが逆さまに見える。
+                if showSettings {
+                    Divider()
+                    settingsSection
+                }
 
-            Divider()
-            footer
+                Divider()
+                footer
+            }
         }
         .frame(width: 420)
         // 他のメニューバーアプリと質感を揃える。単色の板より OS に馴染む。
@@ -77,7 +83,9 @@ struct ContentView: View {
                     Button {
                         model.setSystemOutputDevice(device)
                     } label: {
-                        if device.name == model.outputName {
+                        // 同名のデバイスが並ぶことがある（同じ機種を 2 台など）。
+                        // 名前ではなく UID で今の出力先を見分ける。
+                        if device.uid == model.currentOutputUID {
                             Label(device.name, systemImage: "checkmark")
                         } else {
                             Text(device.name)
@@ -345,6 +353,20 @@ struct ContentView: View {
 
             Spacer()
 
+            // 不具合を報告してもらうには、まず版が分からないと始まらない。
+            // 押せば報告先が開くので、控える手間もいらない。
+            Button {
+                openIssues()
+            } label: {
+                Text(Self.versionLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("問題を報告する（バージョン \(Self.versionLabel)）")
+
+            Spacer()
+
             Button {
                 model.quit()
             } label: {
@@ -355,5 +377,19 @@ struct ContentView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+    }
+
+    /// 表示用のバージョン。Info.plist から読む。
+    private static let versionLabel: String = {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return "v\(short)"
+    }()
+
+    private func openIssues() {
+        guard let url = URL(string: "https://github.com/iam74k4/AppMixer-MacOS/issues") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 }

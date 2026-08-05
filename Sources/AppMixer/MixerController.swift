@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import os
 
 // アプリ別音量の状態管理とタップの生成/破棄、マスター音量を統括する。
 //
@@ -40,6 +41,11 @@ final class MixerController {
     /// 破棄に失敗し、再試行が必要なタップ。放置すると対象アプリが無音のままになる。
     private var pendingTeardown: [ProcessTap] = []
     private var teardownRetryScheduled = false
+    /// 既定出力の切り替えに追従できなかったアプリ。古い出力先を指したままなので
+    /// 実際には無音になっている。復旧するまで再試行し、画面にも印を出す。
+    private var rebuildFailedIDs: Set<String> = []
+    private var rebuildRetryScheduled = false
+    private var rebuildAttempts = 0
     /// メーター用タップを 1 つずつ解放している最中か。
     private var draining = false
     private var deviceListenerInstalled = false
@@ -58,6 +64,14 @@ final class MixerController {
 
     /// 接続されているデバイスの構成が変わったときに呼ばれる。
     var onDeviceListChanged: (() -> Void)?
+
+    /// タップの不調（張り替え失敗とその復旧）が変化したときに呼ばれる。
+    var onTapTroubleChanged: (() -> Void)?
+
+    /// 既定出力の切り替えに追従できず、いま音が出ていないアプリか。
+    func isSilencedByFailedRebuild(id: String) -> Bool {
+        rebuildFailedIDs.contains(id)
+    }
 
     /// いま存在する出力デバイスの UID。振り分け先が生きているかの判定に使う。
     private var liveDeviceUIDs: Set<String> = []
@@ -180,6 +194,7 @@ final class MixerController {
             retireIfNeeded(tap)
         }
         taps.removeValue(forKey: app.id)
+        rebuildFailedIDs.remove(app.id)
     }
 
     /// 現在のアプリ一覧に合わせてタップを同期する。
@@ -263,6 +278,7 @@ final class MixerController {
             taps.removeValue(forKey: id)
         }
         states = states.filter { aliveIDs.contains($0.key) }
+        rebuildFailedIDs.formIntersection(aliveIDs)
     }
 
     /// 音量設定を反映する。要求どおりの状態にできたら true。
@@ -276,7 +292,10 @@ final class MixerController {
             // 死んだ ID をタップしたままになり新しい音声に効かなくなる。
             // 列挙順は保証されないため集合で比較する。
             // 出力先を変えた場合も集約デバイスごと作り直しになる。
-            if Set(tap.processObjectIDs) == Set(app.processObjectIDs),
+            // 既定出力の切り替えに追従できていないタップは、見た目の条件が
+            // 揃っていても実際には音を出せない。素通しさせず必ず張り直す。
+            if !rebuildFailedIDs.contains(app.id),
+               Set(tap.processObjectIDs) == Set(app.processObjectIDs),
                tap.outputDeviceUID == state.outputDeviceUID {
                 // 100% でもタップは張ったままにする（素通し）。スライダーを
                 // 100% 付近で往復するたびに集約デバイスを作り直すと、その
@@ -291,10 +310,11 @@ final class MixerController {
                 tap.invalidate()
                 retireIfNeeded(tap)
                 taps[app.id] = replacement
+                if rebuildFailedIDs.remove(app.id) != nil { onTapTroubleChanged?() }
                 return true
             }
             // 張り替えに失敗したら、古いタップを残す方が安全（設定を失わない）。
-            NSLog("[AppMixer] Keeping previous tap for \(app.name); rebuild failed")
+            AppLog.audio.error("Keeping previous tap for \(app.name, privacy: .private); rebuild failed")
             return false
         }
 
@@ -310,6 +330,8 @@ final class MixerController {
     /// 古い（ヘルパーや出力先が変わった）タップは「無し」と同じ扱いにする。
     func hasFreshTap(for app: AudioApp) -> Bool {
         guard let tap = taps[app.id] else { return false }
+        // 既定出力の切り替えに追従できなかったタップは、もう音を運んでいない。
+        if rebuildFailedIDs.contains(app.id) { return false }
         // 振り分け先が引き抜かれたタップは「生きている」と見なさない。
         // 死んだデバイスを指したままだと、対象アプリは .mutedWhenTapped で
         // 無音のまま取り残され、張り直す経路も塞がってしまう。
@@ -382,7 +404,7 @@ final class MixerController {
             try tap.activate()
             return tap
         } catch {
-            NSLog("[AppMixer] Failed to activate tap for \(app.name): \(error)")
+            AppLog.audio.error("Failed to activate tap for \(app.name, privacy: .private): \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -420,26 +442,55 @@ final class MixerController {
         CoreAudioObject.outputVolumeSupported(CoreAudioObject.defaultOutputDeviceID())
     }
 
+    /// ミュート操作ができるか。専用のミュートを持たないデバイスでも、
+    /// 音量を 0 にする代用が効くならボタンは使えるままにする。
     var masterMuteSupported: Bool {
-        CoreAudioObject.outputMuteSupported(CoreAudioObject.defaultOutputDeviceID())
+        let deviceID = CoreAudioObject.defaultOutputDeviceID()
+        return CoreAudioObject.outputMuteSupported(deviceID)
+            || CoreAudioObject.outputVolumeSupported(deviceID)
     }
+
+    /// 代用ミュート中の復帰先の音量。nil なら代用ミュートはしていない。
+    private var mutedFromVolume: Float?
 
     func masterVolume() -> Float {
         CoreAudioObject.outputVolume(CoreAudioObject.defaultOutputDeviceID()) ?? 1.0
     }
 
     func masterMuted() -> Bool {
-        CoreAudioObject.outputMuted(CoreAudioObject.defaultOutputDeviceID())
+        let deviceID = CoreAudioObject.defaultOutputDeviceID()
+        if CoreAudioObject.outputMuteSupported(deviceID) {
+            return CoreAudioObject.outputMuted(deviceID)
+        }
+        // 代用ミュート中でも、外から音量を上げられたらもうミュートではない。
+        if mutedFromVolume != nil, masterVolume() > 0.0001 { mutedFromVolume = nil }
+        return mutedFromVolume != nil
     }
 
     @discardableResult
     func setMasterVolume(_ volume: Float) -> Bool {
-        CoreAudioObject.setOutputVolume(CoreAudioObject.defaultOutputDeviceID(), volume)
+        // スライダーを動かしたら代用ミュートは解除されたものとして扱う。
+        if volume > 0.0001 { mutedFromVolume = nil }
+        return CoreAudioObject.setOutputVolume(CoreAudioObject.defaultOutputDeviceID(), volume)
     }
 
     @discardableResult
     func setMasterMuted(_ muted: Bool) -> Bool {
-        CoreAudioObject.setOutputMuted(CoreAudioObject.defaultOutputDeviceID(), muted)
+        let deviceID = CoreAudioObject.defaultOutputDeviceID()
+        if CoreAudioObject.outputMuteSupported(deviceID) {
+            return CoreAudioObject.setOutputMuted(deviceID, muted)
+        }
+        // ミュートを持たないデバイス（多くの USB DAC や HDMI 出力）では
+        // 音量 0 で代用する。ボタンを無効にしてしまうより、押せば黙る方がよい。
+        guard CoreAudioObject.outputVolumeSupported(deviceID) else { return false }
+        if muted {
+            // 復帰先が 0 だと解除しても無音のままになる。下限を設けておく。
+            mutedFromVolume = max(masterVolume(), 0.1)
+            return CoreAudioObject.setOutputVolume(deviceID, 0)
+        }
+        let restore = mutedFromVolume ?? 0.5
+        mutedFromVolume = nil
+        return CoreAudioObject.setOutputVolume(deviceID, restore)
     }
 
     func defaultOutputName() -> String {
@@ -451,29 +502,84 @@ final class MixerController {
     private func rebuildActiveTaps() {
         // 出力先が変わったので、マスター音量の監視対象も新しいデバイスへ移す。
         reinstallMasterListeners()
+        // 代用ミュートの復帰先は前のデバイスの値なので、持ち越さない。
+        mutedFromVolume = nil
         onMasterChanged?()
 
         retryPendingTeardown()
 
+        let before = rebuildFailedIDs
         let snapshot = taps
         for (id, oldTap) in snapshot {
             // 出力先を明示しているタップは既定出力の変更と無関係。
             guard oldTap.followsDefaultOutput else { continue }
-            let newTap = ProcessTap(processObjectIDs: oldTap.processObjectIDs)
-            newTap.state.currentGain = oldTap.gain
-            newTap.gain = oldTap.gain
-            do {
-                // 新しい出力先のタップを起動してから古い方を落とす。
-                // 逆順にすると、その隙間だけ対象アプリが全音量で鳴る。
-                try newTap.activate()
-                oldTap.invalidate()
-                retireIfNeeded(oldTap)
-                taps[id] = newTap
-            } catch {
-                // 失敗時は古いタップを残す。破棄してしまうと設定が失われ、
-                // ミュート中のアプリが突然鳴り出す。
-                NSLog("[AppMixer] Rebuild tap failed (\(id)): \(error)")
+            if rebuildTap(id: id, replacing: oldTap) {
+                rebuildFailedIDs.remove(id)
+            } else {
+                rebuildFailedIDs.insert(id)
             }
+        }
+        finishRebuildPass(previousFailures: before)
+    }
+
+    /// 既定出力の変更に合わせてタップを 1 つ張り直す。成功で true。
+    private func rebuildTap(id: String, replacing oldTap: ProcessTap) -> Bool {
+        let newTap = ProcessTap(processObjectIDs: oldTap.processObjectIDs)
+        newTap.state.currentGain = oldTap.gain
+        newTap.gain = oldTap.gain
+        do {
+            // 新しい出力先のタップを起動してから古い方を落とす。
+            // 逆順にすると、その隙間だけ対象アプリが全音量で鳴る。
+            try newTap.activate()
+            oldTap.invalidate()
+            retireIfNeeded(oldTap)
+            taps[id] = newTap
+            return true
+        } catch {
+            // 失敗時は古いタップを残す。破棄してしまうと設定が失われ、
+            // ミュート中のアプリが突然鳴り出す。ただし古いタップは既に
+            // 使われていないデバイスへ書き出しているため、対象アプリは
+            // このあいだ無音になる。放置できないので再試行する。
+            AppLog.audio.error("Rebuild tap failed for \(id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// 張り替えに失敗したぶんだけ、もう一度試す。
+    /// うまくいっているタップまで作り直すと、そのたびに音が飛ぶ。
+    private func retryFailedRebuilds() {
+        let before = rebuildFailedIDs
+        guard !before.isEmpty else { return }
+        for id in before {
+            // アプリごと消えたか、既定出力に追従しないタップに差し替わって
+            // いたら、もう追いかける相手がいない。
+            guard let oldTap = taps[id], oldTap.followsDefaultOutput else {
+                rebuildFailedIDs.remove(id)
+                continue
+            }
+            if rebuildTap(id: id, replacing: oldTap) { rebuildFailedIDs.remove(id) }
+        }
+        finishRebuildPass(previousFailures: before)
+    }
+
+    private func finishRebuildPass(previousFailures before: Set<String>) {
+        if rebuildFailedIDs.isEmpty { rebuildAttempts = 0 }
+        if rebuildFailedIDs != before { onTapTroubleChanged?() }
+        scheduleRebuildRetry()
+    }
+
+    private func scheduleRebuildRetry() {
+        guard !rebuildRetryScheduled, !rebuildFailedIDs.isEmpty else { return }
+        rebuildRetryScheduled = true
+        // 何度も失敗するデバイスに毎秒張り付いても復旧しない。
+        // ただし諦めてしまうと対象アプリが無音のまま残るので、
+        // 間隔を伸ばしながら試し続ける。
+        let delay = min(1.5 * pow(2.0, Double(rebuildAttempts)), 30.0)
+        rebuildAttempts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.rebuildRetryScheduled = false
+            self.retryFailedRebuilds()
         }
     }
 

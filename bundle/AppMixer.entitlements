@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <!--
-      ローカル開発用（非サンドボックス）。
-      audio-input はサンドボックス用エンタイトルメントで、非サンドボックス時は無害。
-      将来 Mac App Store 以外へ配布する際は app-sandbox は付けず Developer ID + 公証を行う。
+      配布構成（非サンドボックス + Hardened Runtime）。
+      公証に必要なのは Hardened Runtime だけで、エンタイトルメントは要らない。
+      システム音声録音の許可は TCC で与えられるもので、エンタイトルメントでは
+      ゲートされない。マイクの権限（device.audio-input）は使っていないため
+      要求しない。要求すると、署名を見た人にマイクを使うアプリだと誤解される。
     -->
-    <key>com.apple.security.device.audio-input</key>
-    <true/>
 </dict>
 </plist>

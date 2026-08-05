@@ -1,12 +1,30 @@
 import AppKit
 import SwiftUI
 import CoreAudio
+import os
 
 // SwiftUI とオーディオエンジン(MixerController)を仲介する ObservableObject。
 // アプリ一覧・マスター音量・検索・権限・メーターを @Published で公開する。
 
 @MainActor
 final class MixerModel: ObservableObject {
+
+    /// 表示と実際の音が食い違っている理由。
+    enum Trouble: Equatable {
+        /// 設定を反映できなかった（タップを張れていない）。音は元のまま鳴っている。
+        case notApplied
+        /// 出力先の切り替えに追従できず、いま音が出ていない。
+        case silenced
+
+        var message: String {
+            switch self {
+            case .notApplied:
+                return "設定を適用できませんでした。実際の音は変わっていません。"
+            case .silenced:
+                return "出力先の切り替えに追従できず、このアプリの音が止まっています。復旧を試みています。"
+            }
+        }
+    }
 
     struct DisplayApp: Identifiable {
         let app: AudioApp
@@ -16,8 +34,8 @@ final class MixerModel: ObservableObject {
         var level: Float
         /// タップが張られている（＝レベルを計測できる）場合のみメーターを表示する。
         var metered: Bool
-        /// 音量を反映できなかった（タップを張れていない）。表示と実際の音が食い違う。
-        var failed: Bool = false
+        /// 不調があればその理由（正常なら nil）。
+        var trouble: Trouble?
         /// 出力先デバイスの UID（nil なら既定出力）。
         var outputDeviceUID: String?
         /// 自動ダッキングで絞られている最中か。
@@ -34,6 +52,8 @@ final class MixerModel: ObservableObject {
     @Published var masterSupported: Bool = true
     @Published var masterMuteSupported: Bool = true
     @Published var outputName: String = ""
+    /// いまの既定出力デバイスの UID（メニューのチェック判定に使う）。
+    @Published var currentOutputUID: String?
 
     @Published var permission: AudioCapturePermission.Status = .notDetermined
 
@@ -74,6 +94,13 @@ final class MixerModel: ObservableObject {
     private static let duckingEnabledKey = "appmixer.ducking.enabled"
     private static let duckLevelKey = "appmixer.ducking.level"
     private static let duckMicKey = "appmixer.ducking.microphone"
+    private static let requestedPermissionKey = "appmixer.permission.requested"
+
+    /// 一度でも許可を求めたか。求める前に勝手にダイアログを出さないための印。
+    private var hasRequestedPermission: Bool {
+        get { defaults.bool(forKey: Self.requestedPermissionKey) }
+        set { defaults.set(newValue, forKey: Self.requestedPermissionKey) }
+    }
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
@@ -98,6 +125,11 @@ final class MixerModel: ObservableObject {
         // 放置するとそのアプリは音の出口を失って無音のままになる。
         controller.onDeviceListChanged = { [weak self] in
             MainActor.assumeIsolated { guard let self else { return }; self.repairMissingRoutes() }
+        }
+
+        // タップの張り替えに失敗した／復旧した。黙って無音にせず画面に出す。
+        controller.onTapTroubleChanged = { [weak self] in
+            MainActor.assumeIsolated { guard let self else { return }; self.syncTapTrouble() }
         }
 
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
@@ -200,7 +232,7 @@ final class MixerModel: ObservableObject {
 
     private func refresh(with enumerated: [AudioApp]) {
         // 反映に失敗している行の印は引き継ぐ（作り直すたびに消さない）。
-        let previouslyFailed = Set(apps.filter(\.failed).map(\.id))
+        let previouslyFailed = Set(apps.filter { $0.trouble == .notApplied }.map(\.id))
 
         // 新規アプリは永続化した設定を復元する。
         // 再生中のものだけに絞る。停止中のアプリまで一斉にタップを張ると、
@@ -224,7 +256,9 @@ final class MixerModel: ObservableObject {
                 muted: state.muted,
                 level: controller.level(forID: app.id),
                 metered: controller.hasFreshTap(for: app),
-                failed: previouslyFailed.contains(app.id),
+                // 無音になっている方が重い。こちらを優先して見せる。
+                trouble: controller.isSilencedByFailedRebuild(id: app.id) ? .silenced
+                    : (previouslyFailed.contains(app.id) ? .notApplied : nil),
                 outputDeviceUID: state.outputDeviceUID,
                 ducked: duckingReason != nil && app.isRunningOutput
                     && !DuckingDetector.isCommunicationApp(app)
@@ -280,6 +314,22 @@ final class MixerModel: ObservableObject {
         refresh(with: enumerated)
     }
 
+    /// タップの張り替え失敗（＝いま無音）の印を一覧へ反映する。
+    /// 復旧したら印は消える。
+    private func syncTapTrouble() {
+        for index in apps.indices {
+            let id = apps[index].id
+            let silenced = controller.isSilencedByFailedRebuild(id: id)
+            if silenced {
+                if apps[index].trouble != .silenced { apps[index].trouble = .silenced }
+            } else if apps[index].trouble == .silenced {
+                apps[index].trouble = nil
+            }
+            let metered = controller.hasFreshTap(for: apps[index].app)
+            if apps[index].metered != metered { apps[index].metered = metered }
+        }
+    }
+
     /// 振り分け先が無くなったアプリを既定出力へ戻し、保存内容も直す。
     private func repairMissingRoutes() {
         let enumerated = AudioAppEnumerator.enumerate()
@@ -302,6 +352,9 @@ final class MixerModel: ObservableObject {
     // MARK: - 出力先ルーティング
 
     func setOutputDevice(_ uid: String?, for app: AudioApp) {
+        // 既定出力と同じ先を選んだら「振り分けなし」と同じ。ここで UID を
+        // 持たせると、意味が無いのにタップを永久に維持することになる。
+        let uid = (uid == currentDefaultDeviceUID) ? nil : uid
         var ok = controller.setOutputDevice(uid, for: app)
 
         // 振り分け先を変えると音の出るデバイスが変わる。そのデバイス用に
@@ -323,15 +376,20 @@ final class MixerModel: ObservableObject {
             $0.volume = state.volume
             $0.muted = state.muted
             $0.metered = controller.hasFreshTap(for: app)
-            $0.failed = !ok
+            $0.trouble = ok ? nil : .notApplied
         }
     }
 
     /// システム全体の出力先を切り替える（ヘッダーのデバイス名から呼ぶ）。
     func setSystemOutputDevice(_ device: AudioDevice) {
-        CoreAudioObject.setDefaultOutputDevice(device.id)
+        // 失敗しても名前だけ書き換えると、実際の出力先と表示が食い違う。
+        guard CoreAudioObject.setDefaultOutputDevice(device.id) else {
+            refreshMaster()
+            return
+        }
         // 切り替わったことをリスナーが拾うが、表示は即座に追いつかせる。
         outputName = device.name
+        currentOutputUID = device.uid
     }
 
     func outputDeviceName(_ uid: String?) -> String {
@@ -456,6 +514,10 @@ final class MixerModel: ObservableObject {
 
     /// メーターがまだ出ていない再生中のアプリを 1 つだけ拾ってタップを張る。
     private func attachNextMeteringTap() {
+        // まだ一度も許可を求めていないうちは、こちらからタップを作らない。
+        // 作ると OS の録音許可ダイアログが勝手に前に出て、ポップオーバーが
+        // 閉じてしまう。ユーザーが「許可」を押すまでは待つ。
+        guard permission == .authorized || hasRequestedPermission else { return }
         // 権限状態では判定しない。TCC の状態取得は環境によって
         // .notDetermined のままになることがあり、そこで弾くと
         // 実際には許可されていてもメーターが永久に出なくなる。
@@ -483,8 +545,8 @@ final class MixerModel: ObservableObject {
         apps[index].metered = controller.hasTap(forID: app.id)
         // 失敗しても音量設定そのものが効いていないとは限らないので、
         // 既に失敗表示が無い行にだけ印を付ける。
-        if !ok && !apps[index].failed && apps[index].volume < 0.999 {
-            apps[index].failed = true
+        if !ok && apps[index].trouble == nil && apps[index].volume < 0.999 {
+            apps[index].trouble = .notApplied
         }
     }
 
@@ -531,6 +593,8 @@ final class MixerModel: ObservableObject {
         if masterMuteSupported != muteSupported { masterMuteSupported = muteSupported }
         let name = controller.defaultOutputName()
         if outputName != name { outputName = name }
+        let uid = currentDefaultDeviceUID
+        if currentOutputUID != uid { currentOutputUID = uid }
         syncMasterValues()
     }
 
@@ -554,6 +618,13 @@ final class MixerModel: ObservableObject {
         meterTick &+= 1
         // 重い処理が同じフレームに重ならないよう位相をずらす。
         if meterTick % 3 == 1 { syncMasterValues() }
+
+        // システム設定やダイアログ側で許可された場合、こちらは何も知らされない。
+        // 定期的に見直さないと「許可が必要です」の帯が出たままになる。
+        if meterTick % 30 == 15, permission != .authorized {
+            let current = AudioCapturePermission.current()
+            if permission != current { permission = current }
+        }
 
         // 表示中はアプリ一覧も定期的に見直す。プロセス一覧は「プロセスの
         // 生成/破棄」でしか変化しないため、起動済みのアプリが再生を
@@ -580,21 +651,23 @@ final class MixerModel: ObservableObject {
 
     func setVolume(_ volume: Float, for app: AudioApp) {
         let ok = controller.setVolume(volume, for: app)
-        saveSetting(for: app)
+        // 効いていない値を保存しない。保存すると、次回以降も「30% のはずが
+        // 100% で鳴る」状態が復元され続ける。
+        if ok { saveSetting(for: app) }
         updateRow(app.id) {
             $0.volume = volume
             $0.metered = controller.hasTap(forID: app.id)
-            $0.failed = !ok
+            $0.trouble = ok ? nil : .notApplied
         }
     }
 
     func setMuted(_ muted: Bool, for app: AudioApp) {
         let ok = controller.setMuted(muted, for: app)
-        saveSetting(for: app)
+        if ok { saveSetting(for: app) }
         updateRow(app.id) {
             $0.muted = muted
             $0.metered = controller.hasTap(forID: app.id)
-            $0.failed = !ok
+            $0.trouble = ok ? nil : .notApplied
         }
     }
 
@@ -626,6 +699,7 @@ final class MixerModel: ObservableObject {
     // MARK: - Permission / app control
 
     func requestPermission() {
+        hasRequestedPermission = true
         AudioCapturePermission.request { [weak self] granted in
             guard let self else { return }
             // 拒否と決めつけない。まだ聞かれていないだけの場合がある。
@@ -661,7 +735,13 @@ final class MixerModel: ObservableObject {
     }
 
     /// アプリ 1 つぶんの保存内容。
+    ///
+    /// 形が変わっても古い保存内容を捨てずに読めるよう、版番号を持たせ、
+    /// 各項目は「無ければ既定値」で読む。新しい版が増えた項目を、
+    /// 古いアプリが読み落として黙って消す事故を避けるための備え。
     private struct StoredSettings: Codable {
+        /// この形式の版。読み書きの互換判断に使う。
+        var version: Int = StoredSettings.currentVersion
         /// 振り分け先（nil なら既定出力に追従）。
         var outputDeviceUID: String?
         /// 出力デバイス UID -> 音量設定。
@@ -670,13 +750,31 @@ final class MixerModel: ObservableObject {
         /// これが無いと、鳴っていない間にデバイスが変わったアプリだけ
         /// 100% で鳴り出してしまう（鳴っていた場合は引き継がれるのに）。
         var lastKnown: DeviceVolume?
+
+        static let currentVersion = 1
+
+        init(outputDeviceUID: String? = nil) {
+            self.outputDeviceUID = outputDeviceUID
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // 版が無いものは v1 より前の何かとして扱う。いまのところ
+            // 出荷済みの旧形式は無いので、既定値のまま読み進めればよい。
+            version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 0
+            outputDeviceUID = try container.decodeIfPresent(String.self, forKey: .outputDeviceUID)
+            perDevice = try container.decodeIfPresent(
+                [String: DeviceVolume].self, forKey: .perDevice) ?? [:]
+            lastKnown = try container.decodeIfPresent(DeviceVolume.self, forKey: .lastKnown)
+        }
     }
 
-    /// 旧形式（デバイスを区別しなかった頃）の保存内容。読み込み時の移行にだけ使う。
-    private struct LegacySetting: Codable {
-        var volume: Float
-        var muted: Bool
-        var outputDeviceUID: String?
+    /// 読み込んだ保存内容と、それを書き戻してよいか。
+    private struct LoadedSettings {
+        var settings = StoredSettings()
+        /// このアプリが理解できない内容が入っているか。
+        /// true の間は書き込まない（知らない項目ごと踏み潰さないため）。
+        var isForeign = false
     }
 
     private func storageKey(for app: AudioApp) -> String? {
@@ -697,35 +795,43 @@ final class MixerModel: ObservableObject {
         CoreAudioObject.deviceUID(CoreAudioObject.defaultOutputDeviceID())
     }
 
-    private func storedSettings(for app: AudioApp) -> StoredSettings {
+    private func loadStored(for app: AudioApp) -> LoadedSettings {
         guard let key = storageKey(for: app), let data = defaults.data(forKey: key) else {
-            return StoredSettings()
+            return LoadedSettings()
         }
-        if let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) {
-            return stored
+        guard let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) else {
+            // 壊れているか、まったく別の形式。読める情報が無いので既定で動くが、
+            // 中身が分からないものを上書きはしない。
+            AppLog.settings.error("Unreadable settings for \(app.bundleID ?? "?", privacy: .private)")
+            return LoadedSettings(isForeign: true)
         }
-        // 旧形式は、そのときの既定デバイスの設定だったものとして引き継ぐ。
-        if let legacy = try? JSONDecoder().decode(LegacySetting.self, from: data) {
-            var migrated = StoredSettings(outputDeviceUID: legacy.outputDeviceUID)
-            let volume = DeviceVolume(volume: legacy.volume, muted: legacy.muted)
-            if let device = legacy.outputDeviceUID ?? currentDefaultDeviceUID {
-                migrated.perDevice[device] = volume
-            }
-            migrated.lastKnown = volume
-            return migrated
-        }
-        return StoredSettings()
+        // このアプリより新しい版で書かれている。読める範囲は使うが、
+        // 書き戻すと知らない項目が落ちるため上書きはしない。
+        return LoadedSettings(
+            settings: stored,
+            isForeign: stored.version > StoredSettings.currentVersion
+        )
+    }
+
+    private func storedSettings(for app: AudioApp) -> StoredSettings {
+        loadStored(for: app).settings
     }
 
     private func saveSetting(for app: AudioApp) {
         guard let key = storageKey(for: app) else { return }
+        let loaded = loadStored(for: app)
+        // 理解できない保存内容には触れない。ここで書くと、新しい版の
+        // AppMixer が残した設定を古い版が黙って削ってしまう。
+        guard !loaded.isForeign else { return }
+
         let state = controller.state(forID: app.id)
-        var stored = storedSettings(for: app)
+        var stored = loaded.settings
+        stored.version = StoredSettings.currentVersion
         stored.outputDeviceUID = state.outputDeviceUID
         let volume = DeviceVolume(volume: state.volume, muted: state.muted)
         // デバイスの UID が読めないときは、そのデバイスぶんの記憶は書かない。
         // 代用キーへ書くと別デバイスの記憶と混ざってしまう。
-        if let key = deviceKey(for: app) { stored.perDevice[key] = volume }
+        if let device = deviceKey(for: app) { stored.perDevice[device] = volume }
         stored.lastKnown = volume
         if let data = try? JSONEncoder().encode(stored) {
             defaults.set(data, forKey: key)

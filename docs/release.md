@@ -51,40 +51,59 @@ make run
 
 ### 2. バージョンを上げる
 
-`bundle/Info.plist` の 2 か所を更新します（Makefile はここからバージョンを読みます）。
-
-- `CFBundleShortVersionString` … 表示用（例 `0.1.0`）
-- `CFBundleVersion` … ビルド番号。リリースごとに必ず増やす
+`bundle/Info.plist` の `CFBundleShortVersionString` を更新します（例 `0.1.0`）。
+Makefile はここからバージョンを読み、`CFBundleVersion`（ビルド番号）は
+そこから機械的に導いて `.app` へ書き込みます。手で増やす必要はありません。
 
 `CHANGELOG.md` の「未リリース」を新しいバージョン見出しに移し、日付を入れます。
 
-### 3. main へ入れてタグを打つ
+コミットして `develop` へ入れておきます。
+
+### 3. 配布物を作る
+
+タグより先に作ります。ここで失敗しても、やり直せる状態のままにしておくためです。
+先にタグを打つと「タグはあるのに配布物が無い」版が残ります。
 
 ```bash
-git checkout main
-git merge --no-ff develop
-git push origin main
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-### 4. 配布物を作る
-
-```bash
+make clean
 make release \
   IDENTITY="Developer ID Application: <名前> (<TEAMID>)" \
   KEYCHAIN_PROFILE=AppMixerNotary
 ```
 
+`make clean` から始めるのは、前回のビルド成果物が混ざらないようにするためです。
 `dist/AppMixer-<version>.zip` ができます。`make release` は次を行います。
 
-1. ビルドと `.app` の組み立て（アイコンの `.icns` 生成を含む）
-2. Hardened Runtime + セキュアタイムスタンプ付きで署名
+1. ビルドと `.app` の組み立て（アイコンの `.icns` 生成、ビルド番号の書き込みを含む）
+2. Hardened Runtime + セキュアタイムスタンプ付きで署名し、署名を検証
 3. zip 化して公証へ提出し、完了を待つ
 4. チケットを `.app` に添付（staple）して zip を作り直す
-5. `spctl` で Gatekeeper の判定を表示
+5. `spctl` で Gatekeeper の判定を確認
 
-### 5. 公開する
+### 4. 配布物を確かめる
+
+タグを打つ前に、これから配る物そのものを試します。
+
+```bash
+# ダウンロード済みファイルと同じ扱いにして、別のマシンで開く
+xattr -w com.apple.quarantine "0081;00000000;Safari;" dist/AppMixer-0.1.0.zip
+```
+
+- [ ] 警告なしで起動する
+- [ ] メニューバーからミキサーが開く
+- [ ] 音量スライダーが効く
+
+### 5. main へ入れてタグを打つ
+
+```bash
+git checkout main
+git merge --no-ff develop
+git push origin main
+git tag -a v0.1.0 -m "AppMixer v0.1.0"
+git push origin v0.1.0
+```
+
+### 6. 公開する
 
 GitHub の Releases でタグ `v0.1.0` を選び、`CHANGELOG.md` の該当部分を本文にして
 `dist/AppMixer-<version>.zip` を添付します。
@@ -96,15 +115,10 @@ GitHub の Releases でタグ `v0.1.0` を選び、`CHANGELOG.md` の該当部�
 **別のマシンで開けるか。** 公証が効いていれば、初回起動で「開発元を検証できません」
 と言われずに起動します。手元の Mac は署名した本人なので気づけません。
 
-```bash
-# ダウンロード済みファイルと同じ扱いにして試す
-xattr -w com.apple.quarantine "0081;00000000;Safari;" dist/AppMixer-0.1.0.zip
-```
-
 **許可のリセット。** 初回起動時の挙動を試すときに使います。
 
 ```bash
-tccutil reset AudioCapture com.appmixer.macos
+tccutil reset AudioCapture io.github.iam74k4.AppMixer
 ```
 
 ---

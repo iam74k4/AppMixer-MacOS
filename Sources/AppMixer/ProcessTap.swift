@@ -1,6 +1,7 @@
 import Foundation
 import CoreAudio
 import Accelerate
+import os
 
 /// IOProc（オーディオスレッド）と UI スレッドで共有する状態。
 ///
@@ -162,22 +163,22 @@ final class ProcessTap {
 
         // 出力側のフォーマットがタップと一致しない場合、単純なバッファコピーでは
         // 早回し再生やノイズになる。取り違えた音を出すより起動を諦める。
-        let outFormat: AudioStreamBasicDescription = CoreAudioObject.read(
-            aggregateID,
-            selector: kAudioStreamPropertyVirtualFormat,
-            scope: kAudioObjectPropertyScopeOutput,
-            defaultValue: AudioStreamBasicDescription()
-        )
-        if outFormat.mChannelsPerFrame != 0 {
-            let interleavedFlag = kAudioFormatFlagIsNonInterleaved
-            guard outFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
-                  outFormat.mBitsPerChannel == 32,
-                  outFormat.mChannelsPerFrame == format.mChannelsPerFrame,
-                  (outFormat.mFormatFlags & interleavedFlag)
-                    == (format.mFormatFlags & interleavedFlag) else {
-                invalidate()
-                throw TapError.unsupportedFormat(outFormat)
-            }
+        //
+        // フォーマットはデバイスではなく「ストリーム」のプロパティなので、
+        // 集約デバイスに直接聞いても取れない。読めなかったときは通すのではなく
+        // 諦める（fail closed）。通してしまうと、この検査そのものが素通りする。
+        guard let outFormat = CoreAudioObject.outputStreamFormat(aggregateID) else {
+            invalidate()
+            throw TapError.unsupportedFormat(AudioStreamBasicDescription())
+        }
+        let interleavedFlag = kAudioFormatFlagIsNonInterleaved
+        guard outFormat.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+              outFormat.mBitsPerChannel == 32,
+              outFormat.mChannelsPerFrame == format.mChannelsPerFrame,
+              (outFormat.mFormatFlags & interleavedFlag)
+                == (format.mFormatFlags & interleavedFlag) else {
+            invalidate()
+            throw TapError.unsupportedFormat(outFormat)
         }
 
         // 箱を強参照でキャプチャし、IOProc 内で self に触れないようにする。
@@ -223,7 +224,7 @@ final class ProcessTap {
             if status == noErr {
                 aggregateID = .unknown
             } else {
-                NSLog("[AppMixer] DestroyAggregateDevice failed (\(status)); will retry")
+                AppLog.audio.error("DestroyAggregateDevice failed (\(status, privacy: .public)); will retry")
             }
         }
         if tapID.isValid {
@@ -231,7 +232,7 @@ final class ProcessTap {
             if status == noErr {
                 tapID = .unknown
             } else {
-                NSLog("[AppMixer] DestroyProcessTap failed (\(status)); will retry")
+                AppLog.audio.error("DestroyProcessTap failed (\(status, privacy: .public)); will retry")
             }
         }
         state.level = 0
