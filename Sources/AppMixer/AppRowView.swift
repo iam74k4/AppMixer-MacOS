@@ -40,6 +40,7 @@ struct AppRowView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(display.muted ? Color.secondary : Color.primary)
                 .frame(width: 52, alignment: .trailing)
+                .help("この音量は「\(model.memoryDeviceName(for: app))」に対して記憶されます")
         }
     }
 

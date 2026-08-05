@@ -51,6 +51,9 @@ final class MixerController {
     /// 音声プロセスの増減（アプリ起動/終了、ブラウザの新規タブ等）を検知したときに呼ばれる。
     var onProcessListChanged: (() -> Void)?
 
+    /// 既定出力デバイスが切り替わったときに呼ばれる（タップの張り直しは済んでいる）。
+    var onDefaultDeviceChanged: (() -> Void)?
+
     init() {
         installDefaultDeviceListener()
         installMasterListeners()
@@ -428,7 +431,11 @@ final class MixerController {
     private func installDefaultDeviceListener() {
         guard !deviceListenerInstalled else { return }
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.rebuildActiveTaps()
+            guard let self else { return }
+            self.rebuildActiveTaps()
+            // 出力先が変わると「そのデバイスでの音量」も変わるため、
+            // 張り直したあとに呼び出し側へ知らせる。
+            self.onDefaultDeviceChanged?()
         }
         let status = AudioObjectAddPropertyListenerBlock(
             .system, &defaultDeviceAddress, DispatchQueue.main, block
