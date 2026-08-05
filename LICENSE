@@ -2,10 +2,13 @@ Copyright (c) 2026 iam74k4. All Rights Reserved.
 
 This software and its source code are proprietary and confidential.
 
-No license, express or implied, is granted to any person to use, copy,
-modify, merge, publish, distribute, sublicense, create derivative works
-from, or sell copies of this software or its source code, in whole or in
-part, by any means.
+Permission is granted to any person to download, install, and run
+unmodified official builds of this software for personal use.
+
+All other rights are reserved. No license, express or implied, is granted
+to copy, modify, merge, publish, distribute, sublicense, create derivative
+works from, or sell this software or its source code, in whole or in part,
+by any means.
 
 The source code may be publicly readable for reference and transparency.
 Such availability does not grant any of the rights listed above.
@@ -27,8 +30,10 @@ SOFTWARE.
 
 著作権者: iam74k4 — 全ての権利を留保します。
 
-本ソフトウェアおよびそのソースコードは著作権者の所有物です。
-閲覧を超える利用（使用・複製・改変・再配布・派生物の作成・販売など）は、
+配布されている公式ビルドを、個人の用途でダウンロード・インストール・実行することは
+許諾します。
+
+それ以外の権利は留保します。複製・改変・再配布・派生物の作成・販売などは、
 その全部か一部かを問わず許諾していません。
 
 ソースコードが公開されている場合でも、それによって上記の権利が

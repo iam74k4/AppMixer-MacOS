@@ -34,6 +34,39 @@ enum CoreAudioObject {
         return value
     }
 
+    /// スカラー値を読み、失敗を nil として区別できる形で返す。
+    /// `read` は失敗時に既定値を返すため、「読めなかった」のか
+    /// 「本当にその値だった」のかが分からない。判定に使う値はこちらで読む。
+    static func readChecked<T>(
+        _ objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector,
+        scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+        defaultValue: T
+    ) -> T? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: scope,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value = defaultValue
+        var dataSize = UInt32(MemoryLayout<T>.size)
+        guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value) == noErr else {
+            return nil
+        }
+        return value
+    }
+
+    /// デバイスの出力ストリームの実フォーマット。
+    /// フォーマットはストリームのプロパティなので、デバイスに直接聞いても
+    /// 取得できない。まず出力ストリームを引いてから、そこに問い合わせる。
+    static func outputStreamFormat(_ deviceID: AudioObjectID) -> AudioStreamBasicDescription? {
+        let streams = readArray(deviceID, selector: kAudioDevicePropertyStreams,
+                                scope: kAudioObjectPropertyScopeOutput)
+        guard let stream = streams.first else { return nil }
+        return readChecked(stream, selector: kAudioStreamPropertyVirtualFormat,
+                           defaultValue: AudioStreamBasicDescription())
+    }
+
     /// プロパティが存在するか。
     static func hasProperty(
         _ objectID: AudioObjectID,

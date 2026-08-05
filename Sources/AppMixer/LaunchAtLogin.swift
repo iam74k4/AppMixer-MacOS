@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import os
 
 // ログイン時の自動起動（macOS 13+ の SMAppService）。
 //
@@ -45,7 +46,7 @@ enum LaunchAtLogin {
             }
             return nil
         } catch {
-            NSLog("[AppMixer] Launch at login \(enabled ? "register" : "unregister") failed: \(error)")
+            AppLog.settings.error("Launch at login \(enabled ? "register" : "unregister", privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             return error.localizedDescription
         }
     }

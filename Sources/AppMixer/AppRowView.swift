@@ -14,6 +14,7 @@ struct AppRowView: View {
     /// そうしないと「なぜこのアプリだけ音が違うのか」が分からなくなる。
     private var showsControls: Bool {
         isHovered || display.muted || display.outputDeviceUID != nil
+            || display.volume < 0.999
     }
 
     var body: some View {
@@ -31,8 +32,8 @@ struct AppRowView: View {
 
             Divider().padding(.leading, 44)
         }
-        .opacity(app.isRunningOutput ? 1.0 : 0.55)
         .background(isHovered ? Color.primary.opacity(0.05) : Color.clear)
+        .opacity(app.isRunningOutput ? 1.0 : 0.55)
         .onHover { isHovered = $0 }
     }
 
@@ -57,8 +58,10 @@ struct AppRowView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(display.muted ? Color.secondary : Color.primary)
                 .frame(width: 52, alignment: .trailing)
-                .help("この音量は「\(model.memoryDeviceName(for: app))」に対して記憶されます。"
-                      + "ダブルクリックで 100% に戻します")
+                // 枠いっぱいを当たり判定にする。これが無いと数字の字面の上
+                // でしかダブルクリックを拾えない。
+                .contentShape(Rectangle())
+                .help(volumeHelp)
                 // スライダーを掴んで戻すより速い、定番の操作。
                 .onTapGesture(count: 2) {
                     model.setVolume(1.0, for: app)
@@ -66,13 +69,19 @@ struct AppRowView: View {
         }
     }
 
+    private var volumeHelp: String {
+        "この音量は「\(model.memoryDeviceName(for: app))」に対して記憶されます。"
+            + "ダブルクリックで 100% に戻します"
+    }
+
     @ViewBuilder
     private var statusBadge: some View {
-        if display.failed {
-            Image(systemName: "exclamationmark.triangle.fill")
+        if let trouble = display.trouble {
+            Image(systemName: trouble == .silenced
+                  ? "speaker.slash.circle.fill" : "exclamationmark.triangle.fill")
                 .font(.caption2)
-                .foregroundStyle(Color.orange)
-                .help("設定を適用できませんでした。実際の音は変わっていません。")
+                .foregroundStyle(trouble == .silenced ? Color.red : Color.orange)
+                .help(trouble.message)
         } else if display.ducked {
             Image(systemName: "arrow.down.right.circle.fill")
                 .font(.caption2)
@@ -188,7 +197,8 @@ struct AppRowView: View {
             }
         }
         .frame(height: 4)
-        .opacity(app.isRunningOutput ? 1 : 0)
+        // 計測できていない行は伸びようがないので、出しても誤解を招く。
+        .opacity(app.isRunningOutput && display.metered ? 1 : 0)
     }
 
     private var meterColor: Color {

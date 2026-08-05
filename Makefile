@@ -8,6 +8,7 @@
 #     make clean
 #
 #   リリース
+#     make clean                  前回の残りを消してから作り直す
 #     make dist    IDENTITY="Developer ID Application: 名前 (TEAMID)"
 #     make notarize KEYCHAIN_PROFILE=AppMixerNotary
 #     make release  IDENTITY="..." KEYCHAIN_PROFILE=...
@@ -26,14 +27,36 @@ CONTENTS  := $(APP)/Contents
 VERSION := $(shell /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" bundle/Info.plist 2>/dev/null)
 ZIP     := $(DIST)/$(APP_NAME)-$(VERSION).zip
 
+# CFBundleVersion は「前のリリースより必ず大きい」ことだけが求められる。
+# 手で上げ忘れると、新しい版を入れても OS が古いままだと見なすことがある。
+# 表示用バージョンから機械的に導いて、上げ忘れを起こさないようにする。
+# 例: 0.1.0 -> 100 / 1.2.3 -> 10203
+BUILD_NUMBER ?= $(shell echo "$(VERSION)" | awk -F. '{ printf "%d", ($$1*10000)+($$2*100)+$$3 }')
+
 # 既定は ad-hoc 署名。配布用は Developer ID を渡すこと。
 IDENTITY ?= -
 # `xcrun notarytool store-credentials` で作ったプロファイル名。
 KEYCHAIN_PROFILE ?=
 
-.PHONY: all build bundle icon sign run dist notarize release clean
+.PHONY: all build bundle icon sign run dist notarize release clean check-version check-identity
+
+# 署名やアーカイブは同じ .app を触るため、並列に走らせると壊れる。
+.NOTPARALLEL:
 
 all: sign
+
+# バージョンが読めないまま進むと、名前が AppMixer-.zip の配布物ができてしまう。
+check-version:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "error: bundle/Info.plist から CFBundleShortVersionString を読めません。"; exit 1; \
+	fi
+
+# 配布用の署名 ID があるか。ビルドを始める前に確かめる。
+check-identity:
+	@if [ "$(IDENTITY)" = "-" ]; then \
+		echo "error: 配布には Developer ID が要ります。"; \
+		echo '       make dist IDENTITY="Developer ID Application: 名前 (TEAMID)"'; exit 1; \
+	fi
 
 # Process Tap API は macOS 14.4 SDK 以降でしか解決できない（Xcode 15.3+）。
 # 古い SDK だと "cannot find 'CATapDescription' in scope" になるため事前に検査する。
@@ -52,14 +75,15 @@ icon:
 		echo "Icon -> bundle/icon/AppIcon.icns"; \
 	fi
 
-bundle: build icon
+bundle: check-version build icon
 	@rm -rf "$(APP)"
 	@mkdir -p "$(CONTENTS)/MacOS" "$(CONTENTS)/Resources"
 	@cp bundle/Info.plist "$(CONTENTS)/Info.plist"
+	@/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(BUILD_NUMBER)" "$(CONTENTS)/Info.plist"
 	@cp bundle/icon/AppIcon.icns "$(CONTENTS)/Resources/AppIcon.icns"
 	@cp "$(BUILD_DIR)/$(APP_NAME)" "$(CONTENTS)/MacOS/$(APP_NAME)"
 	@printf 'APPL????' > "$(CONTENTS)/PkgInfo"
-	@echo "Bundled -> $(APP) (version $(VERSION))"
+	@echo "Bundled -> $(APP) (version $(VERSION), build $(BUILD_NUMBER))"
 
 sign: bundle
 	@codesign --force --options runtime --timestamp \
@@ -67,18 +91,16 @@ sign: bundle
 		--entitlements bundle/$(APP_NAME).entitlements \
 		"$(APP)"
 	@echo "Signed with identity: $(IDENTITY)"
-	@codesign --verify --verbose=2 "$(APP)" || true
+	@codesign --verify --strict --verbose=2 "$(APP)"
 
 run: sign
 	@echo "Launching $(APP) ..."
 	@open "$(APP)"
 
 # 配布用の zip を作る。公証は Developer ID 署名が前提なので ad-hoc を弾く。
-dist: sign
-	@if [ "$(IDENTITY)" = "-" ]; then \
-		echo "error: 配布には Developer ID が要ります。"; \
-		echo '       make dist IDENTITY="Developer ID Application: 名前 (TEAMID)"'; exit 1; \
-	fi
+# 判定は check-identity で先に済ませる。ビルドし終えてから断られても
+# 待った時間が無駄になるだけなので。
+dist: check-identity sign
 	@rm -f "$(ZIP)"
 	@ditto -c -k --keepParent "$(APP)" "$(ZIP)"
 	@echo "Archived -> $(ZIP)"
@@ -98,12 +120,14 @@ notarize:
 	@rm -f "$(ZIP)"
 	@ditto -c -k --keepParent "$(APP)" "$(ZIP)"
 	@echo "Notarized and stapled -> $(ZIP)"
-	@spctl --assess --type execute --verbose=2 "$(APP)" || true
+	@spctl --assess --type execute --verbose=2 "$(APP)"
 
+# 公証まで通ってから印を付ける。先にタグを打つと、失敗したときに
+# 「タグはあるのに配布物が無い」版が残る。
 release: dist notarize
 	@echo
 	@echo "配布物: $(ZIP)"
-	@echo "この後: git tag v$(VERSION) && git push origin v$(VERSION)"
+	@echo "この後: git tag -a v$(VERSION) -m \"AppMixer v$(VERSION)\" && git push origin v$(VERSION)"
 
 clean:
 	@rm -rf .build "$(DIST)" bundle/icon/AppIcon.icns

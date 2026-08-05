@@ -7,15 +7,17 @@
     <key>CFBundleDisplayName</key>
     <string>AppMixer</string>
     <key>CFBundleIdentifier</key>
-    <string>com.appmixer.macos</string>
+    <string>io.github.iam74k4.AppMixer</string>
     <key>CFBundleExecutable</key>
     <string>AppMixer</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1.0</string>
+    <!-- ビルド時に Makefile が CFBundleShortVersionString から導いて上書きする
+         （0.1.0 -> 100）。ここの値は手で編集しなくてよい。 -->
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>100</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>NSHumanReadableCopyright</key>
@@ -27,6 +29,6 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>AppMixer はアプリごとの音量を調整するために、各アプリの音声を取得します。</string>
+    <string>AppMixer はアプリごとの音量を調整するために各アプリの音声を取得し、音量を変えて出力し直します。音声の録音・保存・送信は行いません。</string>
 </dict>
 </plist>
