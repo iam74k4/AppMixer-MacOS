@@ -7,8 +7,12 @@ import Accelerate
 /// IOProc から `weak self` を辿ると弱参照ロードでロック/retain が走り
 /// リアルタイム安全ではないため、値だけを持つ箱を強参照でキャプチャする。
 final class TapState {
-    /// UI が書き、IOProc が読む（0.0...1.0）。
-    var gain: Float = 1.0
+    /// UI が書き、IOProc が目標として読む（0.0...1.0）。
+    var targetGain: Float = 1.0
+    /// IOProc が保持する現在のゲイン。目標へ向かって滑らかに動く。
+    var currentGain: Float = 1.0
+    /// 1 サンプルあたりのゲイン変化量。急変によるプチノイズを防ぐ。
+    var rampStep: Float = 1.0 / 2048.0
     /// IOProc が書き、UI が読む（直近ピーク 0...1）。
     var level: Float = 0
 }
@@ -18,8 +22,11 @@ final class TapState {
 // 構成（Pattern A）:
 //   - CATapDescription(stereoMixdownOfProcesses: [全プロセス]) + .mutedWhenTapped
 //     → 対象アプリの音は通常経路から消える（二重再生防止）
-//   - プライベート集約デバイス = 既定出力デバイス + このタップ
+//   - プライベート集約デバイス = 出力デバイス + このタップ
 //   - 単一 IOProc が「タップ入力 × ゲイン」を出力へ書き込み、同時にピークを計測
+//
+// 出力デバイスは既定出力（outputDeviceUID == nil）か、指定したデバイス。
+// 指定するとそのアプリだけ別のデバイスから鳴らせる（アプリ別ルーティング）。
 
 final class ProcessTap {
 
@@ -34,9 +41,9 @@ final class ProcessTap {
         var description: String {
             switch self {
             case .tapCreationFailed(let s):       return "AudioHardwareCreateProcessTap failed (\(s))"
-            case .noOutputDevice:                 return "No default output device / UID"
+            case .noOutputDevice:                 return "No output device / UID"
             case .unsupportedFormat(let f):
-                return "Unsupported tap format (flags: \(f.mFormatFlags), ch: \(f.mChannelsPerFrame))"
+                return "Unsupported format (flags: \(f.mFormatFlags), ch: \(f.mChannelsPerFrame))"
             case .aggregateCreationFailed(let s): return "AudioHardwareCreateAggregateDevice failed (\(s))"
             case .ioProcCreationFailed(let s):    return "AudioDeviceCreateIOProcIDWithBlock failed (\(s))"
             case .startFailed(let s):             return "AudioDeviceStart failed (\(s))"
@@ -46,13 +53,19 @@ final class ProcessTap {
 
     let processObjectIDs: [AudioObjectID]
 
+    /// 出力先デバイスの UID。nil なら既定出力デバイスに追従する。
+    let outputDeviceUID: String?
+
+    /// 既定出力デバイスの変更に追従すべきタップか。
+    var followsDefaultOutput: Bool { outputDeviceUID == nil }
+
     /// IOProc と共有する状態（ゲイン / メーター）。
     let state = TapState()
 
-    /// 0.0（無音）〜 1.0（原音）。
+    /// 目標ゲイン（0.0...1.0）。実際の適用は数十 ms かけて滑らかに追従する。
     var gain: Float {
-        get { state.gain }
-        set { state.gain = newValue }
+        get { state.targetGain }
+        set { state.targetGain = newValue }
     }
 
     /// 直近のピーク（0...1）。メーター表示用。
@@ -62,8 +75,9 @@ final class ProcessTap {
     private var aggregateID: AudioObjectID = .unknown
     private var deviceProcID: AudioDeviceIOProcID?
 
-    init(processObjectIDs: [AudioObjectID]) {
+    init(processObjectIDs: [AudioObjectID], outputDeviceUID: String? = nil) {
         self.processObjectIDs = processObjectIDs
+        self.outputDeviceUID = outputDeviceUID
     }
 
     deinit { invalidate() }
@@ -93,10 +107,21 @@ final class ProcessTap {
             throw TapError.unsupportedFormat(format)
         }
 
-        let outputDeviceID = CoreAudioObject.defaultOutputDeviceID()
-        guard outputDeviceID.isValid, let outputUID = CoreAudioObject.deviceUID(outputDeviceID) else {
-            invalidate()
-            throw TapError.noOutputDevice
+        // フェード時間からサンプルあたりの変化量を決める（およそ 80ms）。
+        let sampleRate = format.mSampleRate > 0 ? format.mSampleRate : 48_000
+        state.rampStep = Float(1.0 / (sampleRate * 0.08))
+
+        // 出力先。指定が無ければ既定出力を使う。
+        let outputUID: String
+        if let outputDeviceUID {
+            outputUID = outputDeviceUID
+        } else {
+            let deviceID = CoreAudioObject.defaultOutputDeviceID()
+            guard deviceID.isValid, let uid = CoreAudioObject.deviceUID(deviceID) else {
+                invalidate()
+                throw TapError.noOutputDevice
+            }
+            outputUID = uid
         }
 
         let aggregateUID = UUID().uuidString
@@ -120,8 +145,7 @@ final class ProcessTap {
 
         var newAggregateID: AudioObjectID = .unknown
         let aggStatus = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
-        // 生成されたデバイスを取りこぼさないよう、guard の前に保持する
-        // （noErr でも ID が無効なケースで invalidate() が後始末できるように）。
+        // 生成されたデバイスを取りこぼさないよう、guard の前に保持する。
         aggregateID = newAggregateID
         guard aggStatus == noErr, newAggregateID.isValid else {
             invalidate()
@@ -212,7 +236,6 @@ final class ProcessTap {
         output: UnsafeMutablePointer<AudioBufferList>,
         state: TapState
     ) {
-        var g = state.gain
         let inBuffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         let outBuffers = UnsafeMutableAudioBufferListPointer(output)
 
@@ -224,6 +247,10 @@ final class ProcessTap {
             }
         }
 
+        let startGain = state.currentGain
+        let target = state.targetGain
+        let step = state.rampStep
+        var endGain = startGain
         var peak: Float = 0
         let pairCount = min(inBuffers.count, outBuffers.count)
 
@@ -233,23 +260,46 @@ final class ProcessTap {
             guard let inData = inBuffer.mData, let outData = outBuffer.mData else { continue }
 
             let byteCount = min(inBuffer.mDataByteSize, outBuffer.mDataByteSize)
-            let floatCount = Int(byteCount) / MemoryLayout<Float>.size
+            let count = Int(byteCount) / MemoryLayout<Float>.size
+            guard count > 0 else { continue }
             let inPtr = inData.assumingMemoryBound(to: Float.self)
             let outPtr = outData.assumingMemoryBound(to: Float.self)
 
             var localPeak: Float = 0
-            vDSP_maxmgv(inPtr, 1, &localPeak, vDSP_Length(floatCount))
+            vDSP_maxmgv(inPtr, 1, &localPeak, vDSP_Length(count))
             peak = max(peak, localPeak)
 
-            if g == 1.0 {
-                memcpy(outData, inData, Int(byteCount))
+            if startGain == target {
+                if target == 1.0 {
+                    memcpy(outData, inData, Int(byteCount))
+                } else {
+                    var g = target
+                    vDSP_vsmul(inPtr, 1, &g, outPtr, 1, vDSP_Length(count))
+                }
+                endGain = target
             } else {
-                vDSP_vsmul(inPtr, 1, &g, outPtr, 1, vDSP_Length(floatCount))
+                // 目標へ向かって 1 サンプルずつ寄せる。急にゲインを変えると
+                // 波形が不連続になりプチッと鳴るため、必ず滑らかに変化させる。
+                var g = startGain
+                if target > startGain {
+                    for n in 0..<count {
+                        g = min(target, g + step)
+                        outPtr[n] = inPtr[n] * g
+                    }
+                } else {
+                    for n in 0..<count {
+                        g = max(target, g - step)
+                        outPtr[n] = inPtr[n] * g
+                    }
+                }
+                endGain = g
             }
         }
 
+        state.currentGain = endGain
+
         // 減衰付きピークホールド（実効ゲインを反映して表示）
-        let displayPeak = min(1.0, peak * g)
+        let displayPeak = min(1.0, peak * endGain)
         state.level = max(displayPeak, state.level * 0.82)
     }
 }

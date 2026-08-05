@@ -20,7 +20,11 @@ struct AppRowView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.caption2)
                             .foregroundStyle(.orange)
-                            .help("音量を適用できませんでした。実際の音量は変わっていません。")
+                            .help("設定を適用できませんでした。実際の音は変わっていません。")
+                    } else if display.ducked {
+                        Text("自動で音量を下げ中")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
                     } else if !app.isRunningOutput {
                         Text("停止中")
                             .font(.caption2)
@@ -56,6 +60,8 @@ struct AppRowView: View {
                 if display.app.isRunningOutput {
                     meterBar
                 }
+
+                outputPicker
             }
         }
         .padding(.horizontal, 14)
@@ -76,6 +82,46 @@ struct AppRowView: View {
             }
         }
         .frame(width: 32, height: 32)
+    }
+
+    /// このアプリだけの出力先を選ぶ。既定はシステムの出力に追従。
+    private var outputPicker: some View {
+        HStack(spacing: 6) {
+            Image(systemName: display.outputDeviceUID == nil
+                  ? "hifispeaker" : "hifispeaker.fill")
+                .font(.caption2)
+                .foregroundStyle(display.outputDeviceUID == nil ? .secondary : .tint)
+
+            Menu {
+                Button {
+                    model.setOutputDevice(nil, for: app)
+                } label: {
+                    if display.outputDeviceUID == nil {
+                        Label("既定の出力", systemImage: "checkmark")
+                    } else {
+                        Text("既定の出力")
+                    }
+                }
+                Divider()
+                ForEach(model.outputDevices) { device in
+                    Button {
+                        model.setOutputDevice(device.uid, for: app)
+                    } label: {
+                        if display.outputDeviceUID == device.uid {
+                            Label(device.name, systemImage: "checkmark")
+                        } else {
+                            Text(device.name)
+                        }
+                    }
+                }
+            } label: {
+                Text(model.outputDeviceName(display.outputDeviceUID))
+                    .font(.caption2)
+                    .lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
     }
 
     private var meterBar: some View {

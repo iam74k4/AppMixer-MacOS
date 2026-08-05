@@ -17,6 +17,10 @@ final class MixerModel: ObservableObject {
         var metered: Bool
         /// 音量を反映できなかった（タップを張れていない）。表示と実際の音が食い違う。
         var failed: Bool = false
+        /// 出力先デバイスの UID（nil なら既定出力）。
+        var outputDeviceUID: String?
+        /// 自動ダッキングで絞られている最中か。
+        var ducked: Bool = false
         var id: String { app.id }
     }
 
@@ -31,6 +35,18 @@ final class MixerModel: ObservableObject {
     @Published var outputName: String = ""
 
     @Published var permission: AudioCapturePermission.Status = .notDetermined
+
+    // MARK: - 自動ダッキング
+    @Published var duckingEnabled: Bool = false
+    /// ダッキング時に絞る先（0.0...1.0）。
+    @Published var duckLevel: Float = 0.2
+    /// マイク使用も引き金にするか。
+    @Published var duckOnMicrophone: Bool = true
+    /// いま何によってダッキングされているか（表示用。未発動なら nil）。
+    @Published var duckingReason: String?
+
+    /// ルーティング先の選択肢。
+    @Published var outputDevices: [AudioDevice] = []
 
     @Published var launchAtLogin: Bool = false
     /// 自動起動の切り替えに失敗した理由（成功時は nil）。
@@ -51,6 +67,12 @@ final class MixerModel: ObservableObject {
     /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
     private var meteringFailures: [String: Int] = [:]
     private static let meteringRetryLimit = 2
+    /// ダッキング判定用のタイマー（表示に関係なく動く）。
+    private var duckTimer: Timer?
+
+    private static let duckingEnabledKey = "appmixer.ducking.enabled"
+    private static let duckLevelKey = "appmixer.ducking.level"
+    private static let duckMicKey = "appmixer.ducking.microphone"
 
     init() {
         // F11/F12 やシステム設定でマスター音量が変わったら即座に表示へ反映する。
@@ -77,10 +99,21 @@ final class MixerModel: ObservableObject {
         }
 
         startIdleWatchdog()
+
+        // 保存済みのダッキング設定を読み込む。
+        duckingEnabled = defaults.bool(forKey: Self.duckingEnabledKey)
+        if defaults.object(forKey: Self.duckLevelKey) != nil {
+            duckLevel = defaults.float(forKey: Self.duckLevelKey)
+        }
+        if defaults.object(forKey: Self.duckMicKey) != nil {
+            duckOnMicrophone = defaults.bool(forKey: Self.duckMicKey)
+        }
+        if duckingEnabled { startDuckTimer() }
     }
 
     deinit {
         idleWatchdog?.invalidate()
+        duckTimer?.invalidate()
         if let terminationObserver {
             NotificationCenter.default.removeObserver(terminationObserver)
         }
@@ -179,13 +212,110 @@ final class MixerModel: ObservableObject {
                 muted: state.muted,
                 level: controller.level(forID: app.id),
                 metered: controller.hasFreshTap(for: app),
-                failed: previouslyFailed.contains(app.id)
+                failed: previouslyFailed.contains(app.id),
+                outputDeviceUID: state.outputDeviceUID,
+                ducked: duckingReason != nil && !DuckingDetector.isCommunicationApp(app)
             )
         }
+        outputDevices = AudioDeviceEnumerator.outputDevices()
 
         refreshMaster()
         permission = AudioCapturePermission.current()
         refreshLaunchAtLogin()
+    }
+
+    // MARK: - 出力先ルーティング
+
+    func setOutputDevice(_ uid: String?, for app: AudioApp) {
+        let ok = controller.setOutputDevice(uid, for: app)
+        saveSetting(for: app)
+        updateRow(app.id) {
+            $0.outputDeviceUID = uid
+            $0.metered = controller.hasFreshTap(for: app)
+            $0.failed = !ok
+        }
+    }
+
+    func outputDeviceName(_ uid: String?) -> String {
+        guard let uid else { return "既定の出力" }
+        return outputDevices.first { $0.uid == uid }?.name ?? "不明なデバイス"
+    }
+
+    // MARK: - 自動ダッキング
+
+    func setDuckingEnabled(_ enabled: Bool) {
+        duckingEnabled = enabled
+        defaults.set(enabled, forKey: Self.duckingEnabledKey)
+        if enabled { startDuckTimer() }
+        evaluateDucking()
+    }
+
+    /// ダッキングはポップオーバーを閉じていても働く必要があるため、
+    /// 表示用タイマーとは別に、有効な間だけ回す監視を持つ。
+    private func startDuckTimer() {
+        guard duckTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.evaluateDucking() }
+        }
+        timer.tolerance = 0.3
+        RunLoop.main.add(timer, forMode: .common)
+        duckTimer = timer
+    }
+
+    func setDuckLevel(_ level: Float) {
+        duckLevel = max(0.0, min(1.0, level))
+        defaults.set(duckLevel, forKey: Self.duckLevelKey)
+        // 発動中なら新しい深さを即座に反映する。
+        if duckingReason != nil {
+            applyDucking(active: true, apps: AudioAppEnumerator.enumerate())
+        }
+    }
+
+    func setDuckOnMicrophone(_ enabled: Bool) {
+        duckOnMicrophone = enabled
+        defaults.set(enabled, forKey: Self.duckMicKey)
+        evaluateDucking()
+    }
+
+    /// いま通話中かを判定し、状態が変わったらダッキングを適用/解除する。
+    /// ポップオーバーを閉じていても動く必要があるため、
+    /// 画面用の一覧ではなくその場で列挙した結果を使う。
+    private func evaluateDucking() {
+        guard duckingEnabled else {
+            if duckingReason != nil {
+                duckingReason = nil
+                applyDucking(active: false, apps: AudioAppEnumerator.enumerate())
+            }
+            duckTimer?.invalidate()
+            duckTimer = nil
+            return
+        }
+
+        let all = AudioAppEnumerator.enumerate()
+        let reason = DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
+
+        if reason != duckingReason {
+            duckingReason = reason
+            applyDucking(active: reason != nil, apps: all)
+        } else if reason != nil {
+            // 発動中に鳴り始めたアプリも絞る。
+            controller.syncTaps(with: all)
+        }
+    }
+
+    private func applyDucking(active: Bool, apps all: [AudioApp]) {
+        // 通話アプリ自身は絞らない（絞ると相手の声が聞こえなくなる）。
+        let excluded = Set(all.filter(DuckingDetector.isCommunicationApp).map(\.id))
+        controller.setDucking(
+            multiplier: active ? duckLevel : 1.0,
+            excludedIDs: excluded,
+            apps: all
+        )
+        for index in apps.indices {
+            let isExcluded = excluded.contains(apps[index].id)
+            apps[index].ducked = active && !isExcluded
+            apps[index].metered = controller.hasFreshTap(for: apps[index].app)
+        }
     }
 
     // MARK: - Launch at login
@@ -416,6 +546,8 @@ final class MixerModel: ObservableObject {
     private struct Setting: Codable {
         var volume: Float
         var muted: Bool
+        /// 出力先デバイスの UID（未設定なら既定出力）。
+        var outputDeviceUID: String?
     }
 
     private func storageKey(for app: AudioApp) -> String? {
@@ -425,7 +557,9 @@ final class MixerModel: ObservableObject {
     private func saveSetting(for app: AudioApp) {
         guard let key = storageKey(for: app) else { return }
         let state = controller.state(forID: app.id)
-        let setting = Setting(volume: state.volume, muted: state.muted)
+        let setting = Setting(
+            volume: state.volume, muted: state.muted, outputDeviceUID: state.outputDeviceUID
+        )
         if let data = try? JSONEncoder().encode(setting) {
             defaults.set(data, forKey: key)
         }
@@ -437,7 +571,9 @@ final class MixerModel: ObservableObject {
               let setting = try? JSONDecoder().decode(Setting.self, from: data) else {
             return nil
         }
-        return MixerController.State(volume: setting.volume, muted: setting.muted)
+        return MixerController.State(
+            volume: setting.volume, muted: setting.muted, outputDeviceUID: setting.outputDeviceUID
+        )
     }
 
     private func updateRow(_ id: String, _ mutate: (inout DisplayApp) -> Void) {

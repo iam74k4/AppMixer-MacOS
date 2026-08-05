@@ -28,6 +28,8 @@ struct ContentView: View {
             Divider()
             appList
             Divider()
+            duckingSection
+            Divider()
             launchAtLoginSection
             Divider()
             footer
@@ -161,6 +163,59 @@ struct ContentView: View {
                 .frame(maxHeight: 460)
             }
         }
+    }
+
+    // MARK: - 自動ダッキング
+
+    private var duckingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Toggle("通話中は自動で音量を下げる", isOn: Binding(
+                    get: { model.duckingEnabled },
+                    set: { model.setDuckingEnabled($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.callout)
+
+                Spacer()
+
+                if let reason = model.duckingReason {
+                    Label(reason, systemImage: "waveform.badge.mic")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
+            }
+
+            if model.duckingEnabled {
+                HStack(spacing: 8) {
+                    Text("下げる音量")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: { Double(model.duckLevel) },
+                            set: { model.setDuckLevel(Float($0)) }
+                        ),
+                        in: 0...1
+                    )
+                    Text("\(Int((model.duckLevel * 100).rounded()))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 38, alignment: .trailing)
+                }
+
+                Toggle("マイクの使用も引き金にする", isOn: Binding(
+                    get: { model.duckOnMicrophone },
+                    set: { model.setDuckOnMicrophone($0) }
+                ))
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Launch at login
