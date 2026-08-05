@@ -255,6 +255,9 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             }
         }
+        // 外側の VStack は既定で中央寄せのため、幅いっぱいに広げないと
+        // 中身の幅しか持たないこのセクションだけ中央に寄ってしまう。
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
     }
@@ -282,6 +285,7 @@ struct ContentView: View {
                 .font(.caption)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
     }
