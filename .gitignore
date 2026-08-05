@@ -14,3 +14,6 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# アイコンのビルド生成物（iconutil で生成）
+bundle/icon/AppIcon.icns
