@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Mac App Store 用。App Sandbox が必須のため有効にする。
+
+      「システム音声録音」（Process Tap）を許可するサンドボックス用の
+      エンタイトルメントは存在しない。device.audio-input はマイクの権限で
+      あって別物のため、ここには入れない（入れても Process Tap は通らず、
+      署名を見た人にマイクを使うアプリだと誤解されるだけになる）。
+
+      この構成で AudioHardwareCreateProcessTap と
+      AudioHardwareCreateAggregateDevice が通ることは実機で確認済み
+      （2026-08-06）。コードを変えたら make run-sandboxed で確かめ直すこと。
+
+      提出時は Makefile が application-identifier と team-identifier を
+      足したものを組み立てて署名する（この 2 つが無いと、審査ではなく
+      アップロードの検証で弾かれる）。
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+</dict>
+</plist>

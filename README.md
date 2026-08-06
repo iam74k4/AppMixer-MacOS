@@ -46,15 +46,23 @@
 
 ## インストール
 
-[**Releases**](https://github.com/iam74k4/AppMixer-MacOS/releases/latest) から
-`AppMixer-<version>.zip` をダウンロードします。
+**Mac App Store** から入手できます（審査中です。公開までは
+[ソースからビルド](#ソースからビルドする)してお試しください）。
 
-1. zip を展開して `AppMixer.app` を `/Applications` へ移動
-2. 起動すると、メニューバーに 🎚 アイコンが出ます
-3. 初回に「システム音声録音」の許可を求められるので **許可** してください
+1. インストールして起動すると、メニューバーに 🎚 アイコンが出ます
+2. 初回に「システム音声録音」の許可を求められるので **許可** してください
 
-配布物は Developer ID 署名と公証を済ませてあるため、「開発元を検証できません」の
-警告なしで開けます。
+---
+
+## 価格
+
+**買い切り**です。購読ではありません。一度購入すれば、v1 系のアップデートは
+すべて無償で使えます。
+
+購入と復元は Mac App Store が扱います。アカウントの登録や、ライセンスキーの
+入力は要りません。
+
+外部へ送信する情報はありません。音声も、いかなる形でも送信しません。
 
 ---
 
@@ -144,4 +152,7 @@ macOS には「アプリの音量を設定する API」が存在しません。�
 
 Copyright © 2026 iam74k4. All Rights Reserved.
 
-閲覧を超える利用（複製・改変・再配布など）は許諾していません。詳細は [`LICENSE`](LICENSE) を参照してください。
+Mac App Store で入手した公式ビルドは、Apple の
+[Licensed Application End User License Agreement](https://www.apple.com/legal/internet-services/itunes/dev/stdeula/)
+に従ってご利用いただけます。ソースコードの複製・改変・再配布は許諾していません。
+詳細は [`LICENSE`](LICENSE) を参照してください。

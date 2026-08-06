@@ -3,11 +3,13 @@
 <plist version="1.0">
 <dict>
     <!--
-      配布構成（非サンドボックス + Hardened Runtime）。
-      公証に必要なのは Hardened Runtime だけで、エンタイトルメントは要らない。
-      システム音声録音の許可は TCC で与えられるもので、エンタイトルメントでは
-      ゲートされない。マイクの権限（device.audio-input）は使っていないため
-      要求しない。要求すると、署名を見た人にマイクを使うアプリだと誤解される。
+      開発用（make run）。エンタイトルメントは要らない。
+
+      「システム音声録音」の許可は TCC で与えられるもので、エンタイトルメントでは
+      ゲートされない。マイクの権限（device.audio-input）は使っていないため要求
+      しない。要求すると、署名を見た人にマイクを使うアプリだと誤解される。
+
+      提出用は bundle/AppMixer.mas.entitlements（App Sandbox 付き）を使う。
     -->
 </dict>
 </plist>

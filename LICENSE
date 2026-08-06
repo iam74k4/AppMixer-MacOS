@@ -2,8 +2,11 @@ Copyright (c) 2026 iam74k4. All Rights Reserved.
 
 This software and its source code are proprietary and confidential.
 
-Permission is granted to any person to download, install, and run
-unmodified official builds of this software for personal use.
+The official build of this software is distributed through the Mac App
+Store. Its use is governed by Apple's Licensed Application End User
+License Agreement:
+
+  https://www.apple.com/legal/internet-services/itunes/dev/stdeula/
 
 All other rights are reserved. No license, express or implied, is granted
 to copy, modify, merge, publish, distribute, sublicense, create derivative
@@ -30,11 +33,11 @@ SOFTWARE.
 
 著作権者: iam74k4 — 全ての権利を留保します。
 
-配布されている公式ビルドを、個人の用途でダウンロード・インストール・実行することは
-許諾します。
+公式ビルドは Mac App Store で配布しています。その利用には Apple の
+「ライセンス供与されたアプリケーションのエンドユーザ使用許諾契約」が適用されます。
 
-それ以外の権利は留保します。複製・改変・再配布・派生物の作成・販売などは、
-その全部か一部かを問わず許諾していません。
+それ以外の権利は留保します。ソースコードの複製・改変・再配布・派生物の作成・販売
+などは、その全部か一部かを問わず許諾していません。
 
 ソースコードが公開されている場合でも、それによって上記の権利が
 許諾されるものではありません。利用をご希望の場合は著作権者へご連絡ください。
