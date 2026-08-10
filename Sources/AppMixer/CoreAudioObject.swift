@@ -16,6 +16,10 @@ enum CoreAudioObject {
     // MARK: - 汎用リード
 
     /// スカラー値（AudioObjectID / pid_t / UInt32 / AudioStreamBasicDescription 等）を読む。
+    ///
+    /// `T` には数値か C 構造体だけを渡すこと。HAL は渡した領域へ生バイトを
+    /// 書き込むため、オブジェクト参照を含む型を渡すと ARC を迂回して
+    /// 参照カウントが壊れる。CFString を読むときは `readString` を使う。
     static func read<T>(
         _ objectID: AudioObjectID,
         selector: AudioObjectPropertySelector,
@@ -29,7 +33,13 @@ enum CoreAudioObject {
         )
         var value = defaultValue
         var dataSize = UInt32(MemoryLayout<T>.size)
-        let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value)
+        // &value をそのまま渡すと「T がオブジェクト参照を含むかもしれない」と
+        // 警告される。ここは生バイトを受け取る場所だと明示して黙らせる。
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(
+                objectID, &address, 0, nil, &dataSize, UnsafeMutableRawPointer(pointer)
+            )
+        }
         guard status == noErr else { return defaultValue }
         return value
     }
@@ -37,6 +47,8 @@ enum CoreAudioObject {
     /// スカラー値を読み、失敗を nil として区別できる形で返す。
     /// `read` は失敗時に既定値を返すため、「読めなかった」のか
     /// 「本当にその値だった」のかが分からない。判定に使う値はこちらで読む。
+    ///
+    /// `read` と同じく、`T` は数値か C 構造体に限る。
     static func readChecked<T>(
         _ objectID: AudioObjectID,
         selector: AudioObjectPropertySelector,
@@ -50,9 +62,12 @@ enum CoreAudioObject {
         )
         var value = defaultValue
         var dataSize = UInt32(MemoryLayout<T>.size)
-        guard AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value) == noErr else {
-            return nil
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(
+                objectID, &address, 0, nil, &dataSize, UnsafeMutableRawPointer(pointer)
+            )
         }
+        guard status == noErr else { return nil }
         return value
     }
 
@@ -82,6 +97,10 @@ enum CoreAudioObject {
     }
 
     /// CFString プロパティを String として読む。
+    ///
+    /// HAL は保持済み（+1）の CFString を書き込んでくる。`CFString?` の変数へ
+    /// 直接書かせると ARC の管理外で参照カウントが動くため、`Unmanaged` で
+    /// 受けて `takeRetainedValue()` で所有権を引き取る。
     static func readString(
         _ objectID: AudioObjectID,
         selector: AudioObjectPropertySelector,
@@ -92,11 +111,11 @@ enum CoreAudioObject {
             mScope: scope,
             mElement: kAudioObjectPropertyElementMain
         )
-        var value: CFString? = nil
-        var dataSize = UInt32(MemoryLayout<CFString?>.size)
+        var value: Unmanaged<CFString>?
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &value)
         guard status == noErr, let value else { return nil }
-        return value as String
+        return value.takeRetainedValue() as String
     }
 
     /// AudioObjectID 配列を読む（プロセス一覧など）。
