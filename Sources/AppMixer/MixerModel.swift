@@ -99,10 +99,12 @@ final class MixerModel: ObservableObject {
     private static let meteringRetryLimit = 2
     /// ダッキング判定用のタイマー（表示に関係なく動く）。
     private var duckTimer: Timer?
-    /// ダッキング判定で最後に引いたアプリ一覧。
-    /// 「下げる音量」を動かしたときの適用に使い回す。ドラッグ中に列挙を
-    /// 繰り返さないためのもので、発動中は 1 秒以内に更新されている。
+    /// ダッキング判定で最後に引いたアプリ一覧と、その時点の通話アプリの
+    /// id 集合。「下げる音量」を動かしたときの適用に使い回す。ドラッグ中に
+    /// 列挙と除外集合の組み立てを繰り返さないためのもので、発動中は
+    /// 1 秒以内に更新されている。
     private var lastEnumeratedApps: [AudioApp] = []
+    private var lastExcludedIDs: Set<String> = []
 
     private static let duckingEnabledKey = "appmixer.ducking.enabled"
     private static let duckLevelKey = "appmixer.ducking.level"
@@ -546,15 +548,16 @@ final class MixerModel: ObservableObject {
         // ドラッグ 1 フレームごとに AudioAppEnumerator.enumerate()
         // （音声プロセスごとの sysctl と最大 16 段の親 pid 探索）が走る。
         // 引き金に関わるのは「100% かどうか」だけで、それは一覧を見ずに分かる。
+        // 一覧に載っていないタップは setDucking 側が taps 全体への反映で拾う。
         let all = lastEnumeratedApps
         if duckLevel < 0.999 {
             // 倍率を入れ直す。
-            applyDucking(active: true, apps: all)
+            applyDucking(active: true, apps: all, excluded: lastExcludedIDs)
         } else {
             // 100% まで絞る＝何も起きない。「絞っています」の帯と行の印は
             // 次のタイマーを待たずにその場で消す。
             duckingReason = nil
-            applyDucking(active: false, apps: all)
+            applyDucking(active: false, apps: all, excluded: lastExcludedIDs)
         }
     }
 
@@ -571,9 +574,11 @@ final class MixerModel: ObservableObject {
         guard duckingEnabled else {
             if duckingReason != nil {
                 duckingReason = nil
-                applyDucking(active: false, apps: AudioAppEnumerator.enumerate())
+                let all = AudioAppEnumerator.enumerate()
+                applyDucking(active: false, apps: all, excluded: Self.communicationIDs(in: all))
             }
             lastEnumeratedApps = []
+            lastExcludedIDs = []
             duckTimer?.invalidate()
             duckTimer = nil
             return
@@ -581,6 +586,7 @@ final class MixerModel: ObservableObject {
 
         let all = AudioAppEnumerator.enumerate()
         lastEnumeratedApps = all
+        lastExcludedIDs = Self.communicationIDs(in: all)
         // 100% まで絞る＝何も起きない。発動中と表示すると嘘になる。
         let reason = duckLevel < 0.999
             ? DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
@@ -588,8 +594,12 @@ final class MixerModel: ObservableObject {
 
         if reason != duckingReason {
             duckingReason = reason
-            applyDucking(active: reason != nil, apps: all)
+            applyDucking(active: reason != nil, apps: all, excluded: lastExcludedIDs)
         } else if reason != nil {
+            // 発動中も除外集合を最新に保つ。後から鳴り始めた通話アプリは
+            // 発動時の集合に入っておらず、放置すると相手の声まで絞ってしまう。
+            // 集合に変化が無ければ setDucking は何もしない。
+            applyDucking(active: true, apps: all, excluded: lastExcludedIDs)
             // 発動中に鳴り始めたアプリも絞る。
             controller.syncTaps(with: all)
         }
@@ -598,9 +608,11 @@ final class MixerModel: ObservableObject {
         // 巻き添えで畳んでしまう。
     }
 
-    private func applyDucking(active: Bool, apps all: [AudioApp]) {
-        // 通話アプリ自身は絞らない（絞ると相手の声が聞こえなくなる）。
-        let excluded = Set(all.filter(DuckingDetector.isCommunicationApp).map(\.id))
+    /// - Parameter excluded: 通話アプリ自身の id（絞ると相手の声が聞こえなく
+    ///   なるので対象外にする）。apps と同じ列挙から作ったものを渡す。
+    ///   「下げる音量」のドラッグ中に毎イベント作り直さないよう、ここでは
+    ///   計算せず呼び出し側から受け取る。
+    private func applyDucking(active: Bool, apps all: [AudioApp], excluded: Set<String>) {
         controller.setDucking(
             multiplier: active ? duckLevel : 1.0,
             excludedIDs: excluded,
@@ -620,6 +632,11 @@ final class MixerModel: ObservableObject {
         // 閉じていても動くため、ここで片付けないと通話が終わったあとも
         // 全アプリの音声が AppMixer 経由のまま残り続ける。
         if !active { controller.releaseMeteringOnlyTaps() }
+    }
+
+    /// 通話に使われうるアプリの id 集合（＝ダッキングの対象外）。
+    private static func communicationIDs(in apps: [AudioApp]) -> Set<String> {
+        Set(apps.filter(DuckingDetector.isCommunicationApp).map(\.id))
     }
 
     // MARK: - Launch at login

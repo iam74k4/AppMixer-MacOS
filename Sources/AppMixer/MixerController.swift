@@ -209,13 +209,30 @@ final class MixerController {
             }
         }
 
-        duckPending = needsTap
+        // 渡された一覧に載っていないタップにも倍率を反映する。一覧は呼び出し側の
+        // 直近の列挙で、その後に張られたタップ（プロセス増減による refresh 経由）
+        // が載っていないことがある。漏らすと、解除したのに絞られたままの
+        // タップが残る（逆に、発動したのに素通しのままにもなる）。
+        let listed = Set(apps.map(\.id))
+        for (id, tap) in taps where !listed.contains(id) {
+            tap.gain = targetGain(for: id)
+        }
+
+        // 待ち行列は作り直すが、一覧に載っていない待機ぶんは持ち越す。
+        // より新しい列挙（syncTaps 経由）が積んだアプリを、古い一覧しか
+        // 持たない呼び出しで落とさないため。生死の入れ替えは syncTaps の
+        // refreshDuckPending に任せる。
+        let carried = duckPending.filter { !listed.contains($0.id) && taps[$0.id] == nil }
+        duckPending = carried + needsTap
         attachNextDuckTap()
     }
 
     /// ダッキングのために新しく張る必要があるアプリ。1 つずつ処理する。
     private var duckPending: [AudioApp] = []
     private var duckAttachScheduled = false
+    /// 直前にダッキング用のタップを張った時刻。行列が一度空になっても
+    /// 生成の間隔を守るために持つ。
+    private var lastDuckAttach = Date.distantPast
 
     /// 待ち行列へ足す（既に並んでいるものは重ねない）。
     private func enqueueDuckTaps(_ apps: [AudioApp]) {
@@ -238,15 +255,30 @@ final class MixerController {
         }
         guard !duckPending.isEmpty else { return }
 
+        // 行列が一度空になったあとの呼び出しにも間隔を守らせる。行列は
+        // 毎秒の判定とプロセス増減の 2 経路から埋まるため、前回の生成の
+        // 直後に別経路の呼び出しが来ることがある。予約が無い＝即時、に
+        // してしまうと、そこだけ集約デバイスの生成が連続する。
+        let elapsed = Date().timeIntervalSince(lastDuckAttach)
+        if elapsed < 0.08 {
+            scheduleDuckAttach(after: 0.08 - elapsed)
+            return
+        }
+
         let app = duckPending.removeFirst()
         // 対象外に変わっていることがある（通話アプリと判定され直した等）。
         if !duckExcludedIDs.contains(app.id) {
+            lastDuckAttach = Date()
             apply(states[app.id] ?? State(), for: app)
         }
 
-        guard !duckPending.isEmpty, !duckAttachScheduled else { return }
+        guard !duckPending.isEmpty else { return }
+        scheduleDuckAttach(after: 0.08)
+    }
+
+    private func scheduleDuckAttach(after delay: TimeInterval) {
         duckAttachScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.duckAttachScheduled = false
             self.attachNextDuckTap()
