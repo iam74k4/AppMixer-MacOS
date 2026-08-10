@@ -24,11 +24,22 @@ enum AudioCapturePermission {
     private typealias RequestFunc =
         @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
 
+    /// TCC.framework のハンドル。一度だけ開いて閉じない。
+    ///
+    /// current() は一覧を作り直すたびに呼ばれる（＝音声プロセスが増減する
+    /// たびに呼ばれる）。そのたびに dlopen/dlclose を往復するのは、常駐
+    /// アプリの持ち方として割に合わない。request() 側も、非同期コール
+    /// バックのために元から閉じずに使っている。
+    private static let handle: UnsafeMutableRawPointer? = dlopen(tccPath, RTLD_NOW)
+
+    private static func symbol(_ name: String) -> UnsafeMutableRawPointer? {
+        guard let handle else { return nil }
+        return dlsym(handle, name)
+    }
+
     /// 現在の権限状態を（プロンプトを出さずに）取得する。
     static func current() -> Status {
-        guard let handle = dlopen(tccPath, RTLD_NOW) else { return .notDetermined }
-        defer { dlclose(handle) }
-        guard let sym = dlsym(handle, "TCCAccessPreflight") else { return .notDetermined }
+        guard let sym = symbol("TCCAccessPreflight") else { return .notDetermined }
         let preflight = unsafeBitCast(sym, to: PreflightFunc.self)
         switch preflight(serviceName, nil) {
         case 0: return .authorized
@@ -39,9 +50,7 @@ enum AudioCapturePermission {
 
     /// 権限を要求する（未決定なら OS のプロンプトを表示）。完了は main で呼ぶ。
     static func request(_ completion: @escaping (Bool) -> Void) {
-        // dlopen したハンドルはコールバックが非同期のため意図的に閉じない。
-        guard let handle = dlopen(tccPath, RTLD_NOW),
-              let sym = dlsym(handle, "TCCAccessRequest") else {
+        guard let sym = symbol("TCCAccessRequest") else {
             // SPI が使えない場合は最初のタップ生成時に暗黙プロンプトが出る。
             // 権限を持っていると誤表示しないよう、ここでは現在の状態をそのまま返す。
             let granted = current() == .authorized

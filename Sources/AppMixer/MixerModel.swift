@@ -92,6 +92,10 @@ final class MixerModel: ObservableObject {
     private static let meteringRetryLimit = 2
     /// ダッキング判定用のタイマー（表示に関係なく動く）。
     private var duckTimer: Timer?
+    /// ダッキング判定で最後に引いたアプリ一覧。
+    /// 「下げる音量」を動かしたときの適用に使い回す。ドラッグ中に列挙を
+    /// 繰り返さないためのもので、発動中は 1 秒以内に更新されている。
+    private var lastEnumeratedApps: [AudioApp] = []
 
     private static let duckingEnabledKey = "appmixer.ducking.enabled"
     private static let duckLevelKey = "appmixer.ducking.level"
@@ -500,10 +504,22 @@ final class MixerModel: ObservableObject {
         // 発動していないなら 1 秒ごとの判定に任せる。スライダーを動かすたびに
         // プロセス一覧を引き直すのは重い。
         guard duckingReason != nil else { return }
-        // 発動中は引き金の判定からやり直す。100% まで戻したときは「絞っています」
-        // の帯と行の印をその場で消す必要があり、深さだけ変えたときは倍率を
-        // 入れ直す必要がある。前者は次のタイマーまで嘘の表示が残っていた。
-        evaluateDucking(forceApply: true)
+
+        // 深さを変えただけなので、引き金の判定はやり直さない。スライダーは
+        // 値が動くたびにここを呼ぶため、evaluateDucking() を通すと
+        // ドラッグ 1 フレームごとに AudioAppEnumerator.enumerate()
+        // （音声プロセスごとの sysctl と最大 16 段の親 pid 探索）が走る。
+        // 引き金に関わるのは「100% かどうか」だけで、それは一覧を見ずに分かる。
+        let all = lastEnumeratedApps
+        if duckLevel < 0.999 {
+            // 倍率を入れ直す。
+            applyDucking(active: true, apps: all)
+        } else {
+            // 100% まで絞る＝何も起きない。「絞っています」の帯と行の印は
+            // 次のタイマーを待たずにその場で消す。
+            duckingReason = nil
+            applyDucking(active: false, apps: all)
+        }
     }
 
     func setDuckOnMicrophone(_ enabled: Bool) {
@@ -515,19 +531,20 @@ final class MixerModel: ObservableObject {
     /// いま通話中かを判定し、状態が変わったらダッキングを適用/解除する。
     /// ポップオーバーを閉じていても動く必要があるため、
     /// 画面用の一覧ではなくその場で列挙した結果を使う。
-    /// - Parameter forceApply: 引き金が同じでも倍率を入れ直す（深さを変えたとき）。
-    private func evaluateDucking(forceApply: Bool = false) {
+    private func evaluateDucking() {
         guard duckingEnabled else {
             if duckingReason != nil {
                 duckingReason = nil
                 applyDucking(active: false, apps: AudioAppEnumerator.enumerate())
             }
+            lastEnumeratedApps = []
             duckTimer?.invalidate()
             duckTimer = nil
             return
         }
 
         let all = AudioAppEnumerator.enumerate()
+        lastEnumeratedApps = all
         // 100% まで絞る＝何も起きない。発動中と表示すると嘘になる。
         let reason = duckLevel < 0.999
             ? DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
@@ -537,13 +554,8 @@ final class MixerModel: ObservableObject {
             duckingReason = reason
             applyDucking(active: reason != nil, apps: all)
         } else if reason != nil {
-            if forceApply {
-                // 引き金は変わらず深さだけ変わった。倍率を入れ直す。
-                applyDucking(active: true, apps: all)
-            } else {
-                // 発動中に鳴り始めたアプリも絞る。
-                controller.syncTaps(with: all)
-            }
+            // 発動中に鳴り始めたアプリも絞る。
+            controller.syncTaps(with: all)
         }
         // 未発動のまま変化が無ければ何もしない。ここで applyDucking(active: false)
         // を通すと releaseMeteringOnlyTaps() まで走り、メーター用のタップを
@@ -558,10 +570,14 @@ final class MixerModel: ObservableObject {
             excludedIDs: excluded,
             apps: all
         )
+        // 「下げる音量」のスライダーはドラッグ中に何度もここへ来る。変化した
+        // ときだけ書き込む。毎回代入すると、そのたびに一覧全体が再描画される。
         for index in apps.indices {
             let isExcluded = excluded.contains(apps[index].id)
-            apps[index].ducked = active && !isExcluded && apps[index].app.isRunningOutput
-            apps[index].metered = controller.hasFreshTap(for: apps[index].app)
+            let ducked = active && !isExcluded && apps[index].app.isRunningOutput
+            let metered = controller.hasFreshTap(for: apps[index].app)
+            if apps[index].ducked != ducked { apps[index].ducked = ducked }
+            if apps[index].metered != metered { apps[index].metered = metered }
         }
 
         // 絞るために張ったタップを解放する。ダッキングはポップオーバーを

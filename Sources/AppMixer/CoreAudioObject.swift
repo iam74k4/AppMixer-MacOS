@@ -136,7 +136,13 @@ enum CoreAudioObject {
         var ids = [AudioObjectID](repeating: .unknown, count: count)
         let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &ids)
         guard status == noErr else { return [] }
-        return ids
+        // 実際に書き込まれた長さは dataSize に返る。大きさを聞いてから読むまでの
+        // 間に一覧が縮むことがあり、切り詰めないと末尾に .unknown が並んだ配列を
+        // 返してしまう。呼び出し側がそれをそのままタップ対象にすると厄介なので、
+        // ここで正しい長さにする。
+        let written = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard written < count else { return ids }
+        return Array(ids.prefix(written))
     }
 
     // MARK: - 便利メソッド

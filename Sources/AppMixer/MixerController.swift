@@ -156,6 +156,10 @@ final class MixerController {
                 tap.invalidate()
                 retireIfNeeded(tap)
             }
+            // タップを畳んだアプリは通常経路へ戻る。「追従できず無音」では
+            // なくなったので印を外す。releaseMeteringOnlyTaps と同じ理由で、
+            // 残すと次に一覧を作り直したときに赤い印が復活する。
+            if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
             return true
         }
 
@@ -213,6 +217,14 @@ final class MixerController {
     private var duckPending: [AudioApp] = []
     private var duckAttachScheduled = false
 
+    /// 待ち行列へ足す（既に並んでいるものは重ねない）。
+    private func enqueueDuckTaps(_ apps: [AudioApp]) {
+        guard !apps.isEmpty else { return }
+        let queued = Set(duckPending.map(\.id))
+        duckPending.append(contentsOf: apps.filter { !queued.contains($0.id) })
+        attachNextDuckTap()
+    }
+
     /// 待ち行列から 1 つだけタップを張り、残りは間隔をあけて続ける。
     /// releaseMeteringOnlyTaps と同じ理由で、まとめて作らない。
     private func attachNextDuckTap() {
@@ -257,6 +269,9 @@ final class MixerController {
     /// 現在のアプリ一覧に合わせてタップを同期する。
     /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
     func syncTaps(with apps: [AudioApp]) {
+        refreshDuckPending(with: apps)
+
+        var needsDuckTap: [AudioApp] = []
         for app in apps {
             // 設定も無くダッキング対象でもないアプリにタップは要らない。
             let state = states[app.id] ?? State()
@@ -269,7 +284,30 @@ final class MixerController {
             // 鳴り始めれば一覧の作り直しを経てここへ戻ってくる。
             // 既にタップを持っているものは、張り替えが要るので通す。
             guard app.isRunningOutput || taps[app.id] != nil else { continue }
+
+            // ユーザーの設定は無く、ダッキングのためだけに新しく張るもの。
+            // ここで同期ループのまま作ると、setDucking が 0.08 秒間隔に
+            // 分けている意味が無くなる。待ち行列へ回して入口を 1 つにする。
+            if taps[app.id] == nil, !state.isCustomized {
+                needsDuckTap.append(app)
+                continue
+            }
             apply(state, for: app)
+        }
+        enqueueDuckTaps(needsDuckTap)
+    }
+
+    /// 待ち行列の中身を最新の列挙結果へ入れ替える。
+    ///
+    /// 待っている間にアプリが止まったり、音声ヘルパーが入れ替わったりする。
+    /// 積んだ時点の値のまま張ると、鳴っていないアプリや死んだプロセス
+    /// オブジェクトを指すタップを作ってしまう。
+    private func refreshDuckPending(with apps: [AudioApp]) {
+        guard !duckPending.isEmpty else { return }
+        let latest = Dictionary(apps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        duckPending = duckPending.compactMap { pending -> AudioApp? in
+            guard let fresh = latest[pending.id], fresh.isRunningOutput else { return nil }
+            return fresh
         }
     }
 
