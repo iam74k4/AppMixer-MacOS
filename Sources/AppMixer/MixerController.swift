@@ -184,17 +184,57 @@ final class MixerController {
         duckExcludedIDs = excludedIDs
         guard changed else { return }
 
+        var needsTap: [AudioApp] = []
         for app in apps {
             let state = states[app.id] ?? State()
             let beingDucked = duckMultiplier < 1.0 && !duckExcludedIDs.contains(app.id)
 
             if beingDucked && app.isRunningOutput {
-                // 絞るにはタップが要る。ゲインの適用は IOProc 側でフェードする。
-                apply(state, for: app)
+                if taps[app.id] != nil {
+                    // 既にタップがあるなら倍率を入れるだけ。ゲインの適用は
+                    // IOProc 側でフェードするので、ここでは即座でよい。
+                    apply(state, for: app)
+                } else {
+                    // 新しく張るぶんは後回しにする。まとめて作ると集約デバイスの
+                    // 生成が連続し、そのデバイスで再生中の音がすべて飛ぶ。
+                    needsTap.append(app)
+                }
             } else if let tap = taps[app.id] {
                 // 解除。設定が無ければ後で解放されるが、まず音量を戻す。
                 tap.gain = targetGain(for: app.id)
             }
+        }
+
+        duckPending = needsTap
+        attachNextDuckTap()
+    }
+
+    /// ダッキングのために新しく張る必要があるアプリ。1 つずつ処理する。
+    private var duckPending: [AudioApp] = []
+    private var duckAttachScheduled = false
+
+    /// 待ち行列から 1 つだけタップを張り、残りは間隔をあけて続ける。
+    /// releaseMeteringOnlyTaps と同じ理由で、まとめて作らない。
+    private func attachNextDuckTap() {
+        // 待っている間に解除されたら、残りはもう要らない。
+        guard duckMultiplier < 1.0 else {
+            duckPending.removeAll()
+            return
+        }
+        guard !duckPending.isEmpty else { return }
+
+        let app = duckPending.removeFirst()
+        // 対象外に変わっていることがある（通話アプリと判定され直した等）。
+        if !duckExcludedIDs.contains(app.id) {
+            apply(states[app.id] ?? State(), for: app)
+        }
+
+        guard !duckPending.isEmpty, !duckAttachScheduled else { return }
+        duckAttachScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self else { return }
+            self.duckAttachScheduled = false
+            self.attachNextDuckTap()
         }
     }
 
