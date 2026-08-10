@@ -13,7 +13,9 @@ struct AudioApp: Identifiable, Equatable {
     let isRunningOutput: Bool             // いずれかのプロセスが現在出力中か
     let isRunningInput: Bool              // いずれかのプロセスが現在マイクを使用中か
 
-    private let iconAppPID: pid_t?        // アイコン取得用の本体アプリ pid
+    /// アイコン取得用の本体アプリ pid。再起動すると変わるため、
+    /// 取得済みアイコンが同じ世代のものかの見分けにも使う。
+    let iconAppPID: pid_t?
 
     init(id: String, bundleID: String?, name: String,
          processObjectIDs: [AudioObjectID],

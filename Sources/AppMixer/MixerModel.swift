@@ -90,9 +90,11 @@ final class MixerModel: ObservableObject {
     /// tick が続いている（または onAppear 直後の）間だけ true。閉じられた
     /// ことは onDisappear か idleWatchdog が lastTick を nil に戻して伝える。
     private var isPopoverShowing: Bool { lastTick != nil }
-    /// アプリ id -> 取得済みアイコン。一覧を作り直すたびに
-    /// NSRunningApplication / NSWorkspace を引き直さないための持ち越し。
-    private var iconCache: [String: NSImage] = [:]
+    /// アプリ id -> 取得済みアイコンと、取得時の本体アプリ pid。一覧を
+    /// 作り直すたびに NSRunningApplication / NSWorkspace を引き直さない
+    /// ための持ち越し。pid は世代の見分けに使う。同じ id でも再起動を
+    /// 挟むと別のバイナリ（更新後のアイコン）でありうる。
+    private var iconCache: [String: (pid: pid_t?, icon: NSImage)] = [:]
     private var idleWatchdog: Timer?
     /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
     private var meteringFailures: [String: Int] = [:]
@@ -345,13 +347,17 @@ final class MixerModel: ObservableObject {
     ///
     /// AudioApp.icon は NSRunningApplication か NSWorkspace を引く。一覧は
     /// プロセスの増減のたびに作り直されるため、毎回引き直すと常駐中ずっと
-    /// その繰り返しになる。アイコンはアプリの生存中に変わらないものとして
-    /// 持ち越す（消えたアプリのぶんは refresh が捨てる）。
+    /// その繰り返しになる。アイコンは同じ世代（同じ本体 pid）の間は変わら
+    /// ないものとして持ち越す。消えたアプリのぶんは refresh が捨てるが、
+    /// 一覧から消えたことを観測できない速さで再起動された場合も、pid の
+    /// 変化で引き直されるため、更新後のアプリに古い絵を出し続けない。
     /// 取れなかったアプリは覚えず、次の作り直しでまた試す。
     private func cachedIcon(for app: AudioApp) -> NSImage? {
-        if let icon = iconCache[app.id] { return icon }
+        if let cached = iconCache[app.id], cached.pid == app.iconAppPID {
+            return cached.icon
+        }
         guard let icon = app.icon else { return nil }
-        iconCache[app.id] = icon
+        iconCache[app.id] = (app.iconAppPID, icon)
         return icon
     }
 
