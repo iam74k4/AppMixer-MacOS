@@ -26,10 +26,10 @@ enum AudioCapturePermission {
 
     /// TCC.framework のハンドル。一度だけ開いて閉じない。
     ///
-    /// current() は一覧を作り直すたびに呼ばれる（＝音声プロセスが増減する
-    /// たびに呼ばれる）。そのたびに dlopen/dlclose を往復するのは、常駐
-    /// アプリの持ち方として割に合わない。request() 側も、非同期コール
-    /// バックのために元から閉じずに使っている。
+    /// current() は表示中、一覧を作り直すたびに呼ばれるうえ、許可が
+    /// 下りるまでは毎秒の見直しでも呼ばれる。そのたびに dlopen/dlclose を
+    /// 往復するのは、常駐アプリの持ち方として割に合わない。request() 側も、
+    /// 非同期コールバックのために元から閉じずに使っている。
     private static let handle: UnsafeMutableRawPointer? = dlopen(tccPath, RTLD_NOW)
 
     private static func symbol(_ name: String) -> UnsafeMutableRawPointer? {

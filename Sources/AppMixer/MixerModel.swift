@@ -204,7 +204,14 @@ final class MixerModel: ObservableObject {
 
     /// 表示中に一定間隔で呼ばれる（駆動はビュー側のタイマー）。
     func tick() {
+        // onAppear が来ないまま再表示されることがある（ContentView 冒頭の
+        // コメント参照）。閉じの検知を idleWatchdog が担っているのと対で、
+        // 開きの検知はここが担う: tick が途絶えたあとの最初の tick を
+        // 開き直しとみなし、onAppear と同じ読み直しを通す。これが無いと、
+        // 閉じている間に変わったデバイス名やメニューが古いまま表示され続ける。
+        let reopened = lastTick == nil
         lastTick = Date()
+        if reopened { refresh() }
         tickMeters()
     }
 
@@ -311,8 +318,9 @@ final class MixerModel: ObservableObject {
         // ここから下は表示のためだけの読み直しで、閉じている間は誰も見ない。
         // refresh はプロセス一覧が変わるたび（ブラウザのタブ操作でも）呼ばれる
         // ため、閉じている間まで TCC への問い合わせ、servicemanagementd への
-        // XPC、デバイス列挙を繰り返さない。開いた瞬間は onAppear が同じ経路を
-        // 通るので、表示はそこで追いつく。
+        // XPC、デバイス列挙を繰り返さない。表示は開いたときに追いつく:
+        // onAppear が refresh を呼び、onAppear が来なかった開き直しでは
+        // tick() が最初の 1 回で refresh を呼ぶ。
         guard isPopoverShowing else { return }
         outputDevices = AudioDeviceEnumerator.outputDevices()
 
