@@ -124,7 +124,7 @@ final class MixerModel: ObservableObject {
         // 振り分け先のデバイスが抜かれたら既定出力へ戻す。
         // 放置するとそのアプリは音の出口を失って無音のままになる。
         controller.onDeviceListChanged = { [weak self] in
-            MainActor.assumeIsolated { guard let self else { return }; self.repairMissingRoutes() }
+            MainActor.assumeIsolated { guard let self else { return }; self.handleDeviceListChanged() }
         }
 
         // タップの張り替えに失敗した／復旧した。黙って無音にせず画面に出す。
@@ -235,17 +235,37 @@ final class MixerModel: ObservableObject {
         let previouslyFailed = Set(apps.filter { $0.trouble == .notApplied }.map(\.id))
 
         // 新規アプリは永続化した設定を復元する。
-        // 再生中のものだけに絞る。停止中のアプリまで一斉にタップを張ると、
-        // 集約デバイスの生成が連続してそのデバイス上の全再生が音飛びする。
-        // 停止中のアプリは、再生を始めた時点でプロセス一覧の変化を拾って復元される。
-        for app in enumerated where controller.states[app.id] == nil && app.isRunningOutput {
-            if let saved = loadSetting(for: app) {
+        //
+        // タップを張るのは再生中のものだけに絞る。停止中のアプリまで一斉に
+        // 張ると、集約デバイスの生成が連続してそのデバイス上の全再生が音飛びする。
+        // 停止中のアプリには状態だけ入れておき、鳴り始めた時点で反映する。
+        //
+        // 状態を入れずに飛ばすと、一覧が既定値（100%・ミュート解除）を表示して
+        // しまう。ミュートしたはずのアプリが「100%」と出るうえ、行の操作まで
+        // 既定値扱いで隠れる。実際に鳴らすと保存値で鳴るので、表示だけが嘘になる。
+        for app in enumerated where controller.states[app.id] == nil {
+            guard let saved = loadSetting(for: app) else { continue }
+            if app.isRunningOutput {
                 controller.restore(saved, for: app)
+            } else {
+                controller.seed(saved, for: app)
             }
         }
         controller.prune(aliveIDs: Set(enumerated.map(\.id)))
         // 音声ヘルパーが入れ替わったアプリのタップを張り直す
         controller.syncTaps(with: enumerated)
+
+        // 失敗の印を引き継ぐのは「まだ反映できていない」行だけにする。設定どおりの
+        // タップが張れた行や、設定が既定に戻ってそもそも反映するものが無い行から
+        // 外さないと、復旧しても手でスライダーを動かすまで警告が残り続ける。
+        // 判定はタップを張り直したあとの状態で行う必要があるため、ここで求める。
+        let stillNotApplied = Set(
+            enumerated.filter { app in
+                previouslyFailed.contains(app.id)
+                    && controller.state(forID: app.id).isCustomized
+                    && !controller.hasFreshTap(for: app)
+            }.map(\.id)
+        )
 
         apps = enumerated.map { app in
             let state = controller.state(forID: app.id)
@@ -258,7 +278,7 @@ final class MixerModel: ObservableObject {
                 metered: controller.hasFreshTap(for: app),
                 // 無音になっている方が重い。こちらを優先して見せる。
                 trouble: controller.isSilencedByFailedRebuild(id: app.id) ? .silenced
-                    : (previouslyFailed.contains(app.id) ? .notApplied : nil),
+                    : (stillNotApplied.contains(app.id) ? .notApplied : nil),
                 outputDeviceUID: state.outputDeviceUID,
                 ducked: duckingReason != nil && app.isRunningOutput
                     && !DuckingDetector.isCommunicationApp(app)
@@ -330,11 +350,17 @@ final class MixerModel: ObservableObject {
         }
     }
 
-    /// 振り分け先が無くなったアプリを既定出力へ戻し、保存内容も直す。
-    private func repairMissingRoutes() {
+    /// デバイスの構成が変わった。振り分け先が無くなったアプリを既定出力へ戻し、
+    /// 保存内容を直したうえで、選択肢の一覧も入れ替える。
+    ///
+    /// 直す相手がいなくても最後まで進むこと。デバイスが増えただけのときに
+    /// 何もしないと、増えたデバイスが出力先メニューに出てこない。既定出力に
+    /// なるデバイス（ヘッドフォン等）は別の通知で拾えるが、既定にならない
+    /// デバイス（HDMI ディスプレイ、2 台目のインターフェース、仮想デバイス）は
+    /// この通知しか手がかりが無い。
+    private func handleDeviceListChanged() {
         let enumerated = AudioAppEnumerator.enumerate()
         let repaired = controller.repairMissingRoutes(apps: enumerated)
-        guard !repaired.isEmpty else { return }
         for app in enumerated where repaired.contains(app.id) {
             saveSetting(for: app)
         }
@@ -484,6 +510,10 @@ final class MixerModel: ObservableObject {
 
     // MARK: - Launch at login
 
+    /// 直近の登録/解除で OS が返したエラー。
+    /// 登録できなかった理由は状態からは分からないため、別に持っておく。
+    private var launchAtLoginError: String?
+
     func refreshLaunchAtLogin() {
         let state = LaunchAtLogin.state
         let enabled = (state == .enabled)
@@ -495,15 +525,23 @@ final class MixerModel: ObservableObject {
             problem = "システム設定のログイン項目で許可してください"
         case .notFound:
             problem = "アプリの場所が変わりました。一度オフにして入れ直してください"
-        case .enabled, .disabled:
+        case .enabled:
+            // 有効になっているなら、前回の失敗はもう関係ない。
+            launchAtLoginError = nil
             problem = nil
+        case .disabled:
+            // 状態からは「登録されていない」ことしか分からない。切り替えに
+            // 失敗して戻ってきた場合は、その理由をそのまま見せる。ここで
+            // nil にすると、register() が投げた理由が誰にも届かないまま
+            // トグルだけが黙って戻る。
+            problem = launchAtLoginError
         }
         if launchAtLoginProblem != problem { launchAtLoginProblem = problem }
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
         launchAtLogin = enabled
-        launchAtLoginProblem = LaunchAtLogin.setEnabled(enabled)
+        launchAtLoginError = LaunchAtLogin.setEnabled(enabled)
         // 実際に登録できたかは OS 側の状態で確認する。
         refreshLaunchAtLogin()
     }
@@ -539,6 +577,9 @@ final class MixerModel: ObservableObject {
         let ok = controller.ensureMeteringTap(for: app)
         if ok {
             meteringFailures[app.id] = nil
+            // 張れたなら設定は反映されている。一覧の作り直しを待たずにここで
+            // 印を外す（作り直しは顔ぶれが変わったときしか走らない）。
+            if apps[index].trouble == .notApplied { apps[index].trouble = nil }
         } else {
             meteringFailures[app.id, default: 0] += 1
         }
