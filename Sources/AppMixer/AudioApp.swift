@@ -12,18 +12,20 @@ struct AudioApp: Identifiable, Equatable {
     let processObjectIDs: [AudioObjectID] // このアプリの全音声プロセスオブジェクト（タップ対象）
     let pids: [pid_t]
     let isRunningOutput: Bool             // いずれかのプロセスが現在出力中か
+    let isRunningInput: Bool              // いずれかのプロセスが現在マイクを使用中か
 
     private let iconAppPID: pid_t?        // アイコン取得用の本体アプリ pid
 
     init(id: String, bundleID: String?, name: String,
          processObjectIDs: [AudioObjectID], pids: [pid_t],
-         isRunningOutput: Bool, iconAppPID: pid_t?) {
+         isRunningOutput: Bool, isRunningInput: Bool, iconAppPID: pid_t?) {
         self.id = id
         self.bundleID = bundleID
         self.name = name
         self.processObjectIDs = processObjectIDs
         self.pids = pids
         self.isRunningOutput = isRunningOutput
+        self.isRunningInput = isRunningInput
         self.iconAppPID = iconAppPID
     }
 
@@ -61,6 +63,7 @@ enum AudioAppEnumerator {
             var objectIDs: [AudioObjectID] = []
             var pids: [pid_t] = []
             var runningOutput = false
+            var runningInput = false
             init(bundleID: String?, name: String, iconAppPID: pid_t?) {
                 self.bundleID = bundleID
                 self.name = name
@@ -99,6 +102,7 @@ enum AudioAppEnumerator {
             builder.objectIDs.append(objectID)
             builder.pids.append(pid)
             if isRunningOutput(objectID) { builder.runningOutput = true }
+            if isRunningInput(objectID) { builder.runningInput = true }
             builders[key] = builder
         }
 
@@ -110,6 +114,7 @@ enum AudioAppEnumerator {
                 processObjectIDs: b.objectIDs,
                 pids: b.pids,
                 isRunningOutput: b.runningOutput,
+                isRunningInput: b.runningInput,
                 iconAppPID: b.iconAppPID
             )
         }
@@ -145,5 +150,18 @@ enum AudioAppEnumerator {
             return value != 0
         }
         return false
+    }
+
+    /// このプロセスが今まさにマイクを使っているか。
+    /// 出力と違って IsRunning へのフォールバックはしない。落とすと、
+    /// 再生しているだけのアプリまで「マイク使用中」と誤判定してしまう。
+    private static func isRunningInput(_ objectID: AudioObjectID) -> Bool {
+        guard CoreAudioObject.hasProperty(
+            objectID, selector: kAudioProcessPropertyIsRunningInput
+        ) else { return false }
+        let value: UInt32 = CoreAudioObject.read(
+            objectID, selector: kAudioProcessPropertyIsRunningInput, defaultValue: 0
+        )
+        return value != 0
     }
 }

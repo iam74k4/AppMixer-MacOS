@@ -50,33 +50,16 @@ enum DuckingDetector {
         return prefixes.contains { bundleID.hasPrefix($0.lowercased()) }
     }
 
-    /// いずれかのプロセスがマイクを使っているか。
-    static func isMicrophoneActive() -> Bool {
-        let objectIDs = CoreAudioObject.readArray(.system, selector: kAudioHardwarePropertyProcessObjectList)
-        let ownPID = ProcessInfo.processInfo.processIdentifier
-
-        for objectID in objectIDs {
-            let pid: pid_t = CoreAudioObject.read(
-                objectID, selector: kAudioProcessPropertyPID, defaultValue: pid_t(-1)
-            )
-            guard pid > 0, pid != ownPID else { continue }
-            guard CoreAudioObject.hasProperty(objectID, selector: kAudioProcessPropertyIsRunningInput) else {
-                continue
-            }
-            let running: UInt32 = CoreAudioObject.read(
-                objectID, selector: kAudioProcessPropertyIsRunningInput, defaultValue: 0
-            )
-            if running != 0 { return true }
-        }
-        return false
-    }
-
     /// 現在ダッキングすべきか、そのきっかけになったアプリ名とともに返す。
+    ///
+    /// マイクの判定は渡された一覧から読む。以前はここでプロセス一覧を
+    /// もう一度引いていたが、この関数はダッキングが有効な間ずっと毎秒
+    /// 呼ばれるため、走査は 1 回で済ませる。
     static func evaluate(apps: [AudioApp], useMicrophone: Bool) -> String? {
         if let app = apps.first(where: { $0.isRunningOutput && isMeetingApp($0) }) {
             return app.name
         }
-        if useMicrophone && isMicrophoneActive() {
+        if useMicrophone, apps.contains(where: \.isRunningInput) {
             return "マイク使用中"
         }
         return nil

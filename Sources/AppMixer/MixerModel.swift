@@ -497,10 +497,10 @@ final class MixerModel: ObservableObject {
     func setDuckLevel(_ level: Float) {
         duckLevel = max(0.0, min(1.0, level))
         defaults.set(duckLevel, forKey: Self.duckLevelKey)
-        // 発動中なら新しい深さを即座に反映する。
-        if duckingReason != nil {
-            applyDucking(active: true, apps: AudioAppEnumerator.enumerate())
-        }
+        // 引き金の判定からやり直す。100% まで戻したときは「絞っています」の
+        // 帯と行の印をその場で消す必要があり、深さだけ変えたときは倍率を
+        // 入れ直す必要がある。前者は次のタイマーまで嘘の表示が残っていた。
+        evaluateDucking(forceApply: true)
     }
 
     func setDuckOnMicrophone(_ enabled: Bool) {
@@ -512,7 +512,8 @@ final class MixerModel: ObservableObject {
     /// いま通話中かを判定し、状態が変わったらダッキングを適用/解除する。
     /// ポップオーバーを閉じていても動く必要があるため、
     /// 画面用の一覧ではなくその場で列挙した結果を使う。
-    private func evaluateDucking() {
+    /// - Parameter forceApply: 引き金が同じでも倍率を入れ直す（深さを変えたとき）。
+    private func evaluateDucking(forceApply: Bool = false) {
         guard duckingEnabled else {
             if duckingReason != nil {
                 duckingReason = nil
@@ -531,6 +532,9 @@ final class MixerModel: ObservableObject {
 
         if reason != duckingReason {
             duckingReason = reason
+            applyDucking(active: reason != nil, apps: all)
+        } else if forceApply {
+            // 引き金は変わらず深さだけ変わった。倍率を入れ直す。
             applyDucking(active: reason != nil, apps: all)
         } else if reason != nil {
             // 発動中に鳴り始めたアプリも絞る。
