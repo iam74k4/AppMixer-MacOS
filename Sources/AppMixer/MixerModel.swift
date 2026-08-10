@@ -222,7 +222,7 @@ final class MixerModel: ObservableObject {
         // 音量を変えたアプリのタップはそのまま維持する。
         controller.releaseMeteringOnlyTaps()
         for index in apps.indices {
-            apps[index].metered = controller.hasTap(forID: apps[index].id)
+            apps[index].metered = controller.hasFreshTap(for: apps[index].app)
         }
     }
 
@@ -633,7 +633,7 @@ final class MixerModel: ObservableObject {
         } else {
             meteringFailures[app.id, default: 0] += 1
         }
-        apps[index].metered = controller.hasTap(forID: app.id)
+        apps[index].metered = controller.hasFreshTap(for: app)
         // 失敗しても音量設定そのものが効いていないとは限らないので、
         // 既に失敗表示が無い行にだけ印を付ける。
         if !ok && apps[index].trouble == nil && apps[index].volume < 0.999 {
@@ -730,9 +730,8 @@ final class MixerModel: ObservableObject {
         // 変化があったときだけ書き込む。毎フレーム代入すると、全アプリが
         // 無音でも 30fps で画面全体の再描画を起こしてしまう。
         for index in apps.indices {
-            let id = apps[index].id
-            let level = controller.level(forID: id)
-            let metered = controller.hasTap(forID: id)
+            let level = controller.level(forID: apps[index].id)
+            let metered = controller.hasFreshTap(for: apps[index].app)
             if apps[index].level != level { apps[index].level = level }
             if apps[index].metered != metered { apps[index].metered = metered }
         }
@@ -747,7 +746,7 @@ final class MixerModel: ObservableObject {
         if ok { saveSetting(for: app) }
         updateRow(app.id) {
             $0.volume = volume
-            $0.metered = controller.hasTap(forID: app.id)
+            $0.metered = controller.hasFreshTap(for: app)
             $0.trouble = ok ? nil : .notApplied
         }
     }
@@ -757,7 +756,7 @@ final class MixerModel: ObservableObject {
         if ok { saveSetting(for: app) }
         updateRow(app.id) {
             $0.muted = muted
-            $0.metered = controller.hasTap(forID: app.id)
+            $0.metered = controller.hasFreshTap(for: app)
             $0.trouble = ok ? nil : .notApplied
         }
     }

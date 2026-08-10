@@ -322,7 +322,7 @@ final class MixerController {
             // 既定出力の切り替えに追従できていないタップは、見た目の条件が
             // 揃っていても実際には音を出せない。素通しさせず必ず張り直す。
             if !rebuildFailedIDs.contains(app.id),
-               Set(tap.processObjectIDs) == Set(app.processObjectIDs),
+               Self.sameProcesses(tap.processObjectIDs, app.processObjectIDs),
                tap.outputDeviceUID == state.outputDeviceUID {
                 // 100% でもタップは張ったままにする（素通し）。スライダーを
                 // 100% 付近で往復するたびに集約デバイスを作り直すと、その
@@ -364,8 +364,19 @@ final class MixerController {
         // 死んだデバイスを指したままだと、対象アプリは .mutedWhenTapped で
         // 無音のまま取り残され、張り直す経路も塞がってしまう。
         if let uid = tap.outputDeviceUID, !liveDeviceUIDs.contains(uid) { return false }
-        return Set(tap.processObjectIDs) == Set(app.processObjectIDs)
-            && tap.outputDeviceUID == (states[app.id] ?? State()).outputDeviceUID
+        guard tap.outputDeviceUID == (states[app.id] ?? State()).outputDeviceUID else { return false }
+        return Self.sameProcesses(tap.processObjectIDs, app.processObjectIDs)
+    }
+
+    /// 音声プロセスの顔ぶれが同じか。列挙順は保証されないので順序は見ない。
+    ///
+    /// 集合を作らずに突き合わせる。この判定は表示の更新に合わせて 30fps で
+    /// 全アプリぶん呼ばれるため、Set を作ると毎秒数百回の確保になる。
+    /// どちらも HAL のプロセス一覧由来で重複が無いため、個数が同じで
+    /// 片側が全部含まれていれば集合として等しい。
+    private static func sameProcesses(_ a: [AudioObjectID], _ b: [AudioObjectID]) -> Bool {
+        guard a.count == b.count else { return false }
+        return a.allSatisfy { b.contains($0) }
     }
 
     /// 振り分け先が無くなったアプリを既定出力へ戻す。戻したアプリの id を返す。
