@@ -31,8 +31,6 @@ enum LaunchAtLogin {
         }
     }
 
-    static var isEnabled: Bool { state == .enabled }
-
     /// 自動起動を切り替える。失敗した理由を返す（成功時は nil）。
     static func setEnabled(_ enabled: Bool) -> String? {
         do {

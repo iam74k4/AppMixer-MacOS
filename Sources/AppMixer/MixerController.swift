@@ -156,6 +156,10 @@ final class MixerController {
                 tap.invalidate()
                 retireIfNeeded(tap)
             }
+            // タップを畳んだアプリは通常経路へ戻る。「追従できず無音」では
+            // なくなったので印を外す。releaseMeteringOnlyTaps と同じ理由で、
+            // 残すと次に一覧を作り直したときに赤い印が復活する。
+            if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
             return true
         }
 
@@ -205,17 +209,45 @@ final class MixerController {
             }
         }
 
-        duckPending = needsTap
+        // 渡された一覧に載っていないタップにも倍率を反映する。一覧は呼び出し側の
+        // 直近の列挙で、その後に張られたタップ（プロセス増減による refresh 経由）
+        // が載っていないことがある。漏らすと、解除したのに絞られたままの
+        // タップが残る（逆に、発動したのに素通しのままにもなる）。
+        let listed = Set(apps.map(\.id))
+        for (id, tap) in taps where !listed.contains(id) {
+            tap.gain = targetGain(for: id)
+        }
+
+        // 待ち行列は作り直すが、一覧に載っていない待機ぶんは持ち越す。
+        // より新しい列挙（syncTaps 経由）が積んだアプリを、古い一覧しか
+        // 持たない呼び出しで落とさないため。生死の入れ替えは syncTaps の
+        // refreshDuckPending に任せる。
+        let carried = duckPending.filter { !listed.contains($0.id) && taps[$0.id] == nil }
+        duckPending = carried + needsTap
         attachNextDuckTap()
     }
 
     /// ダッキングのために新しく張る必要があるアプリ。1 つずつ処理する。
     private var duckPending: [AudioApp] = []
     private var duckAttachScheduled = false
+    /// 直前にダッキング用のタップを張った時刻。行列が一度空になっても
+    /// 生成の間隔を守るために持つ。
+    private var lastDuckAttach = Date.distantPast
+
+    /// 待ち行列へ足す（既に並んでいるものは重ねない）。
+    private func enqueueDuckTaps(_ apps: [AudioApp]) {
+        guard !apps.isEmpty else { return }
+        let queued = Set(duckPending.map(\.id))
+        duckPending.append(contentsOf: apps.filter { !queued.contains($0.id) })
+        attachNextDuckTap()
+    }
 
     /// 待ち行列から 1 つだけタップを張り、残りは間隔をあけて続ける。
     /// releaseMeteringOnlyTaps と同じ理由で、まとめて作らない。
     private func attachNextDuckTap() {
+        // 0.08 秒後の実行が予約済みなら、そちらに任せる。予約中に外から
+        // 呼ばれるたびに 1 つ処理すると、待ち行列に分けた間隔が詰まる。
+        guard !duckAttachScheduled else { return }
         // 待っている間に解除されたら、残りはもう要らない。
         guard duckMultiplier < 1.0 else {
             duckPending.removeAll()
@@ -223,15 +255,30 @@ final class MixerController {
         }
         guard !duckPending.isEmpty else { return }
 
+        // 行列が一度空になったあとの呼び出しにも間隔を守らせる。行列は
+        // 毎秒の判定とプロセス増減の 2 経路から埋まるため、前回の生成の
+        // 直後に別経路の呼び出しが来ることがある。予約が無い＝即時、に
+        // してしまうと、そこだけ集約デバイスの生成が連続する。
+        let elapsed = Date().timeIntervalSince(lastDuckAttach)
+        if elapsed < 0.08 {
+            scheduleDuckAttach(after: 0.08 - elapsed)
+            return
+        }
+
         let app = duckPending.removeFirst()
         // 対象外に変わっていることがある（通話アプリと判定され直した等）。
         if !duckExcludedIDs.contains(app.id) {
+            lastDuckAttach = Date()
             apply(states[app.id] ?? State(), for: app)
         }
 
-        guard !duckPending.isEmpty, !duckAttachScheduled else { return }
+        guard !duckPending.isEmpty else { return }
+        scheduleDuckAttach(after: 0.08)
+    }
+
+    private func scheduleDuckAttach(after delay: TimeInterval) {
         duckAttachScheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.duckAttachScheduled = false
             self.attachNextDuckTap()
@@ -244,19 +291,12 @@ final class MixerController {
         apply(state, for: app)
     }
 
-    func reset(for app: AudioApp) {
-        states[app.id] = State()
-        if let tap = taps[app.id] {
-            tap.invalidate()
-            retireIfNeeded(tap)
-        }
-        taps.removeValue(forKey: app.id)
-        clearRebuildFailure(app.id)
-    }
-
     /// 現在のアプリ一覧に合わせてタップを同期する。
     /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
     func syncTaps(with apps: [AudioApp]) {
+        refreshDuckPending(with: apps)
+
+        var needsDuckTap: [AudioApp] = []
         for app in apps {
             // 設定も無くダッキング対象でもないアプリにタップは要らない。
             let state = states[app.id] ?? State()
@@ -269,7 +309,30 @@ final class MixerController {
             // 鳴り始めれば一覧の作り直しを経てここへ戻ってくる。
             // 既にタップを持っているものは、張り替えが要るので通す。
             guard app.isRunningOutput || taps[app.id] != nil else { continue }
+
+            // ユーザーの設定は無く、ダッキングのためだけに新しく張るもの。
+            // ここで同期ループのまま作ると、setDucking が 0.08 秒間隔に
+            // 分けている意味が無くなる。待ち行列へ回して入口を 1 つにする。
+            if taps[app.id] == nil, !state.isCustomized {
+                needsDuckTap.append(app)
+                continue
+            }
             apply(state, for: app)
+        }
+        enqueueDuckTaps(needsDuckTap)
+    }
+
+    /// 待ち行列の中身を最新の列挙結果へ入れ替える。
+    ///
+    /// 待っている間にアプリが止まったり、音声ヘルパーが入れ替わったりする。
+    /// 積んだ時点の値のまま張ると、鳴っていないアプリや死んだプロセス
+    /// オブジェクトを指すタップを作ってしまう。
+    private func refreshDuckPending(with apps: [AudioApp]) {
+        guard !duckPending.isEmpty else { return }
+        let latest = Dictionary(apps.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        duckPending = duckPending.compactMap { pending -> AudioApp? in
+            guard let fresh = latest[pending.id], fresh.isRunningOutput else { return nil }
+            return fresh
         }
     }
 

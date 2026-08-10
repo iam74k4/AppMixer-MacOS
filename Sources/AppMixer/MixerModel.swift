@@ -86,12 +86,34 @@ final class MixerModel: ObservableObject {
     private var meterTick: UInt64 = 0
     /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
     private var lastTick: Date?
+    /// ポップオーバーが表示されているとみなせるか。
+    /// tick が続いている（または onAppear 直後の）間だけ true。閉じられた
+    /// ことは onDisappear か idleWatchdog が lastTick を nil に戻して伝える。
+    private var isPopoverShowing: Bool { lastTick != nil }
+    /// アプリ id -> 取得済みアイコンと、取得時の本体アプリ pid。一覧を
+    /// 作り直すたびに NSRunningApplication / NSWorkspace を引き直さない
+    /// ための持ち越し。pid は世代の見分けに使う。同じ id でも再起動を
+    /// 挟むと別のバイナリ（更新後のアイコン）でありうる。
+    private var iconCache: [String: (pid: pid_t?, icon: NSImage)] = [:]
     private var idleWatchdog: Timer?
     /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
     private var meteringFailures: [String: Int] = [:]
     private static let meteringRetryLimit = 2
     /// ダッキング判定用のタイマー（表示に関係なく動く）。
     private var duckTimer: Timer?
+    /// ダッキング判定で最後に引いたアプリ一覧と、その時点の通話アプリの
+    /// id 集合。「下げる音量」を動かしたときの適用に使い回す。ドラッグ中に
+    /// 列挙と除外集合の組み立てを繰り返さないためのもので、発動中は
+    /// 1 秒以内に更新されている。
+    private var lastEnumeratedApps: [AudioApp] = []
+    private var lastExcludedIDs: Set<String> = []
+    /// 保存待ちのアプリ設定。スライダーのドラッグ中は値が変わるたびに
+    /// setVolume が呼ばれるため、その場で保存すると JSON の復号・符号化と
+    /// UserDefaults への書き込みがイベントレートで走る。音への反映は即座に
+    /// 行い、保存だけ手が止まるのを待って 1 回にする。
+    private var pendingSaves: [String: (app: AudioApp, work: DispatchWorkItem)] = [:]
+    /// 「下げる音量」の保存の予約。理由は pendingSaves と同じ。
+    private var duckLevelSaveWork: DispatchWorkItem?
 
     private static let duckingEnabledKey = "appmixer.ducking.enabled"
     private static let duckLevelKey = "appmixer.ducking.level"
@@ -136,12 +158,17 @@ final class MixerModel: ObservableObject {
 
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
         // 後始末をせずに終了するとそのアプリが無音のままになる。
+        // 保存待ちの設定もここで書き切る。
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { guard let self else { return }; self.controller.shutdown() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.flushPendingSaves()
+                self.controller.shutdown()
+            }
         }
 
         startIdleWatchdog()
@@ -182,12 +209,23 @@ final class MixerModel: ObservableObject {
         // 解放中に開き直されたら中断する。
         controller.cancelMeteringRelease()
         meteringFailures.removeAll()
+        // 最初の tick を待たずに「表示中」にする。これから呼ぶ refresh が
+        // 表示中にしか行わない読み直し（権限・自動起動・デバイス一覧）を
+        // この印で判定するため、先に立てておかないと開いた直後の一回が抜ける。
+        lastTick = Date()
         refresh()
     }
 
     /// 表示中に一定間隔で呼ばれる（駆動はビュー側のタイマー）。
     func tick() {
+        // onAppear が来ないまま再表示されることがある（ContentView 冒頭の
+        // コメント参照）。閉じの検知を idleWatchdog が担っているのと対で、
+        // 開きの検知はここが担う: tick が途絶えたあとの最初の tick を
+        // 開き直しとみなし、onAppear と同じ読み直しを通す。これが無いと、
+        // 閉じている間に変わったデバイス名やメニューが古いまま表示され続ける。
+        let reopened = lastTick == nil
         lastTick = Date()
+        if reopened { refresh() }
         tickMeters()
     }
 
@@ -218,6 +256,9 @@ final class MixerModel: ObservableObject {
     }
 
     func onDisappear() {
+        // 来ないことがある通知だが、来たなら閉じたと確定している。
+        // idleWatchdog の 2 秒を待たずに「表示中」を下ろす。
+        lastTick = nil
         // 表示していない間は、メーター用に張っただけのタップを解放する。
         // 音量を変えたアプリのタップはそのまま維持する。
         controller.releaseMeteringOnlyTaps()
@@ -253,7 +294,9 @@ final class MixerModel: ObservableObject {
                 controller.seed(saved, for: app)
             }
         }
-        controller.prune(aliveIDs: Set(enumerated.map(\.id)))
+        let aliveIDs = Set(enumerated.map(\.id))
+        controller.prune(aliveIDs: aliveIDs)
+        iconCache = iconCache.filter { aliveIDs.contains($0.key) }
         // 音声ヘルパーが入れ替わったアプリのタップを張り直す
         controller.syncTaps(with: enumerated)
 
@@ -273,7 +316,7 @@ final class MixerModel: ObservableObject {
             let state = controller.state(forID: app.id)
             return DisplayApp(
                 app: app,
-                icon: app.icon,
+                icon: cachedIcon(for: app),
                 volume: state.volume,
                 muted: state.muted,
                 level: controller.level(forID: app.id),
@@ -286,11 +329,36 @@ final class MixerModel: ObservableObject {
                     && !DuckingDetector.isCommunicationApp(app)
             )
         }
+        // ここから下は表示のためだけの読み直しで、閉じている間は誰も見ない。
+        // refresh はプロセス一覧が変わるたび（ブラウザのタブ操作でも）呼ばれる
+        // ため、閉じている間まで TCC への問い合わせ、servicemanagementd への
+        // XPC、デバイス列挙を繰り返さない。表示は開いたときに追いつく:
+        // onAppear が refresh を呼び、onAppear が来なかった開き直しでは
+        // tick() が最初の 1 回で refresh を呼ぶ。
+        guard isPopoverShowing else { return }
         outputDevices = AudioDeviceEnumerator.outputDevices()
 
         refreshMaster()
         permission = AudioCapturePermission.current()
         refreshLaunchAtLogin()
+    }
+
+    /// アイコンを取り出す（無ければ取得して覚える）。
+    ///
+    /// AudioApp.icon は NSRunningApplication か NSWorkspace を引く。一覧は
+    /// プロセスの増減のたびに作り直されるため、毎回引き直すと常駐中ずっと
+    /// その繰り返しになる。アイコンは同じ世代（同じ本体 pid）の間は変わら
+    /// ないものとして持ち越す。消えたアプリのぶんは refresh が捨てるが、
+    /// 一覧から消えたことを観測できない速さで再起動された場合も、pid の
+    /// 変化で引き直されるため、更新後のアプリに古い絵を出し続けない。
+    /// 取れなかったアプリは覚えず、次の作り直しでまた試す。
+    private func cachedIcon(for app: AudioApp) -> NSImage? {
+        if let cached = iconCache[app.id], cached.pid == app.iconAppPID {
+            return cached.icon
+        }
+        guard let icon = app.icon else { return nil }
+        iconCache[app.id] = (app.iconAppPID, icon)
+        return icon
     }
 
     // MARK: - デバイスごとの音量記憶
@@ -496,14 +564,43 @@ final class MixerModel: ObservableObject {
 
     func setDuckLevel(_ level: Float) {
         duckLevel = max(0.0, min(1.0, level))
-        defaults.set(duckLevel, forKey: Self.duckLevelKey)
+        scheduleDuckLevelSave()
         // 発動していないなら 1 秒ごとの判定に任せる。スライダーを動かすたびに
         // プロセス一覧を引き直すのは重い。
         guard duckingReason != nil else { return }
-        // 発動中は引き金の判定からやり直す。100% まで戻したときは「絞っています」
-        // の帯と行の印をその場で消す必要があり、深さだけ変えたときは倍率を
-        // 入れ直す必要がある。前者は次のタイマーまで嘘の表示が残っていた。
-        evaluateDucking(forceApply: true)
+
+        // 深さを変えただけなので、引き金の判定はやり直さない。スライダーは
+        // 値が動くたびにここを呼ぶため、evaluateDucking() を通すと
+        // ドラッグ 1 フレームごとに AudioAppEnumerator.enumerate()
+        // （音声プロセスごとの sysctl と最大 16 段の親 pid 探索）が走る。
+        // 引き金に関わるのは「100% かどうか」だけで、それは一覧を見ずに分かる。
+        // 一覧に載っていないタップは setDucking 側が taps 全体への反映で拾う。
+        let all = lastEnumeratedApps
+        if duckLevel < 0.999 {
+            // 倍率を入れ直す。
+            applyDucking(active: true, apps: all, excluded: lastExcludedIDs)
+        } else {
+            // 100% まで絞る＝何も起きない。「絞っています」の帯と行の印は
+            // 次のタイマーを待たずにその場で消す。
+            duckingReason = nil
+            applyDucking(active: false, apps: all, excluded: lastExcludedIDs)
+        }
+    }
+
+    /// 「下げる音量」の保存を予約する。スライダーは値が変わるたびに
+    /// setDuckLevel を呼ぶため、その場で書くと設定デーモンへの書き込みが
+    /// イベントレートで走る。倍率の反映は即座、保存だけ束ねる。
+    private func scheduleDuckLevelSave() {
+        duckLevelSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.duckLevelSaveWork = nil
+                self.defaults.set(self.duckLevel, forKey: Self.duckLevelKey)
+            }
+        }
+        duckLevelSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     func setDuckOnMicrophone(_ enabled: Bool) {
@@ -515,19 +612,23 @@ final class MixerModel: ObservableObject {
     /// いま通話中かを判定し、状態が変わったらダッキングを適用/解除する。
     /// ポップオーバーを閉じていても動く必要があるため、
     /// 画面用の一覧ではなくその場で列挙した結果を使う。
-    /// - Parameter forceApply: 引き金が同じでも倍率を入れ直す（深さを変えたとき）。
-    private func evaluateDucking(forceApply: Bool = false) {
+    private func evaluateDucking() {
         guard duckingEnabled else {
             if duckingReason != nil {
                 duckingReason = nil
-                applyDucking(active: false, apps: AudioAppEnumerator.enumerate())
+                let all = AudioAppEnumerator.enumerate()
+                applyDucking(active: false, apps: all, excluded: Self.communicationIDs(in: all))
             }
+            lastEnumeratedApps = []
+            lastExcludedIDs = []
             duckTimer?.invalidate()
             duckTimer = nil
             return
         }
 
         let all = AudioAppEnumerator.enumerate()
+        lastEnumeratedApps = all
+        lastExcludedIDs = Self.communicationIDs(in: all)
         // 100% まで絞る＝何も起きない。発動中と表示すると嘘になる。
         let reason = duckLevel < 0.999
             ? DuckingDetector.evaluate(apps: all, useMicrophone: duckOnMicrophone)
@@ -535,39 +636,49 @@ final class MixerModel: ObservableObject {
 
         if reason != duckingReason {
             duckingReason = reason
-            applyDucking(active: reason != nil, apps: all)
+            applyDucking(active: reason != nil, apps: all, excluded: lastExcludedIDs)
         } else if reason != nil {
-            if forceApply {
-                // 引き金は変わらず深さだけ変わった。倍率を入れ直す。
-                applyDucking(active: true, apps: all)
-            } else {
-                // 発動中に鳴り始めたアプリも絞る。
-                controller.syncTaps(with: all)
-            }
+            // 発動中も除外集合を最新に保つ。後から鳴り始めた通話アプリは
+            // 発動時の集合に入っておらず、放置すると相手の声まで絞ってしまう。
+            // 集合に変化が無ければ setDucking は何もしない。
+            applyDucking(active: true, apps: all, excluded: lastExcludedIDs)
+            // 発動中に鳴り始めたアプリも絞る。
+            controller.syncTaps(with: all)
         }
         // 未発動のまま変化が無ければ何もしない。ここで applyDucking(active: false)
         // を通すと releaseMeteringOnlyTaps() まで走り、メーター用のタップを
         // 巻き添えで畳んでしまう。
     }
 
-    private func applyDucking(active: Bool, apps all: [AudioApp]) {
-        // 通話アプリ自身は絞らない（絞ると相手の声が聞こえなくなる）。
-        let excluded = Set(all.filter(DuckingDetector.isCommunicationApp).map(\.id))
+    /// - Parameter excluded: 通話アプリ自身の id（絞ると相手の声が聞こえなく
+    ///   なるので対象外にする）。apps と同じ列挙から作ったものを渡す。
+    ///   「下げる音量」のドラッグ中に毎イベント作り直さないよう、ここでは
+    ///   計算せず呼び出し側から受け取る。
+    private func applyDucking(active: Bool, apps all: [AudioApp], excluded: Set<String>) {
         controller.setDucking(
             multiplier: active ? duckLevel : 1.0,
             excludedIDs: excluded,
             apps: all
         )
+        // 「下げる音量」のスライダーはドラッグ中に何度もここへ来る。変化した
+        // ときだけ書き込む。毎回代入すると、そのたびに一覧全体が再描画される。
         for index in apps.indices {
             let isExcluded = excluded.contains(apps[index].id)
-            apps[index].ducked = active && !isExcluded && apps[index].app.isRunningOutput
-            apps[index].metered = controller.hasFreshTap(for: apps[index].app)
+            let ducked = active && !isExcluded && apps[index].app.isRunningOutput
+            let metered = controller.hasFreshTap(for: apps[index].app)
+            if apps[index].ducked != ducked { apps[index].ducked = ducked }
+            if apps[index].metered != metered { apps[index].metered = metered }
         }
 
         // 絞るために張ったタップを解放する。ダッキングはポップオーバーを
         // 閉じていても動くため、ここで片付けないと通話が終わったあとも
         // 全アプリの音声が AppMixer 経由のまま残り続ける。
         if !active { controller.releaseMeteringOnlyTaps() }
+    }
+
+    /// 通話に使われうるアプリの id 集合（＝ダッキングの対象外）。
+    private static func communicationIDs(in apps: [AudioApp]) -> Set<String> {
+        Set(apps.filter(DuckingDetector.isCommunicationApp).map(\.id))
     }
 
     // MARK: - Launch at login
@@ -755,7 +866,13 @@ final class MixerModel: ObservableObject {
         let ok = controller.setVolume(volume, for: app)
         // 効いていない値を保存しない。保存すると、次回以降も「30% のはずが
         // 100% で鳴る」状態が復元され続ける。
-        if ok { saveSetting(for: app) }
+        if ok {
+            scheduleSave(for: app)
+        } else {
+            // 反映に失敗したら予約も取り下げる。予約は発火時点の状態を
+            // 書くため、残すと反映できなかった値まで保存されてしまう。
+            pendingSaves.removeValue(forKey: app.id)?.work.cancel()
+        }
         updateRow(app.id) {
             $0.volume = volume
             $0.metered = controller.hasFreshTap(for: app)
@@ -818,7 +935,9 @@ final class MixerModel: ObservableObject {
     }
 
     func quit() {
-        // 終了通知が届く前に確実にタップを解除し、各アプリの音声を戻す。
+        // 終了通知が届く前に、保存待ちの設定を書き切り、確実にタップを
+        // 解除して各アプリの音声を戻す。
+        flushPendingSaves()
         controller.shutdown()
         NSApp.terminate(nil)
     }
@@ -919,7 +1038,48 @@ final class MixerModel: ObservableObject {
         loadStored(for: app).settings
     }
 
+    /// 保存を予約する（0.5 秒以内に次が来たら置き換え）。saveSetting は
+    /// 発火時点の state を書くので、予約が置き換わっても最終値は失われない。
+    private func scheduleSave(for app: AudioApp) {
+        pendingSaves[app.id]?.work.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingSaves[app.id] = nil
+                // 予約から発火までの間にアプリごと消えて prune された場合は
+                // 書かない。state が無いまま saveSetting を呼ぶと、既定値
+                // （100%・ミュート解除）で保存済みの記憶を上書きしてしまう。
+                guard self.controller.states[app.id] != nil else { return }
+                self.saveSetting(for: app)
+            }
+        }
+        pendingSaves[app.id] = (app, work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// 予約中の保存をその場で書き切る。終了の経路で呼ぶこと。
+    /// 呼ばないと、終了直前の操作だけが保存されないまま失われる。
+    private func flushPendingSaves() {
+        let pending = pendingSaves
+        pendingSaves.removeAll()
+        for entry in pending.values {
+            entry.work.cancel()
+            // 予約後に消えたアプリは書かない（予約の発火側と同じ理由）。
+            guard controller.states[entry.app.id] != nil else { continue }
+            saveSetting(for: entry.app)
+        }
+        if duckLevelSaveWork != nil {
+            duckLevelSaveWork?.cancel()
+            duckLevelSaveWork = nil
+            defaults.set(duckLevel, forKey: Self.duckLevelKey)
+        }
+    }
+
     private func saveSetting(for app: AudioApp) {
+        // ここで直に書くので、同じアプリの予約は同じ内容の書き直しにしか
+        // ならない。取り下げる（ミュートや出力先の変更は即時保存のため、
+        // 直前のドラッグの予約とここで合流する）。
+        pendingSaves.removeValue(forKey: app.id)?.work.cancel()
         guard let key = storageKey(for: app) else { return }
         let loaded = loadStored(for: app)
         // 理解できない保存内容には触れない。ここで書くと、新しい版の

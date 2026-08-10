@@ -136,31 +136,16 @@ enum CoreAudioObject {
         var ids = [AudioObjectID](repeating: .unknown, count: count)
         let status = AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, &ids)
         guard status == noErr else { return [] }
-        return ids
+        // 実際に書き込まれた長さは dataSize に返る。大きさを聞いてから読むまでの
+        // 間に一覧が縮むことがあり、切り詰めないと末尾に .unknown が並んだ配列を
+        // 返してしまう。呼び出し側がそれをそのままタップ対象にすると厄介なので、
+        // ここで正しい長さにする。
+        let written = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        guard written < count else { return ids }
+        return Array(ids.prefix(written))
     }
 
     // MARK: - 便利メソッド
-
-    /// pid からプロセス AudioObjectID へ変換（qualifier として pid を渡す）。
-    static func processObject(for pid: pid_t) -> AudioObjectID {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var pidValue = pid
-        var objectID: AudioObjectID = .unknown
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        let status = withUnsafeMutablePointer(to: &pidValue) { qualifier in
-            AudioObjectGetPropertyData(
-                .system, &address,
-                UInt32(MemoryLayout<pid_t>.size), qualifier,
-                &dataSize, &objectID
-            )
-        }
-        guard status == noErr else { return .unknown }
-        return objectID
-    }
 
     /// システムの既定出力デバイス。
     static func defaultOutputDeviceID() -> AudioObjectID {
