@@ -385,12 +385,21 @@ final class MixerController {
             var s = states[app.id] ?? State()
             s.outputDeviceUID = nil
             states[app.id] = s
+            // 行き先は直したので、鳴らせたかに関わらず保存の対象にする。
+            repaired.append(app.id)
+
+            // 鳴っていないアプリに、ここで新しくタップを張らない。停止中の
+            // アプリにも保存済みの設定（振り分け先を含む）が入っているため、
+            // これが無いと引き抜き 1 回で、黙っているアプリのぶんまで集約
+            // デバイスがまとめて作られ、既定出力で再生中の音が飛ぶ。
+            // 状態を既定出力へ直しておけば、鳴り始めた時点で syncTaps が拾う。
+            guard app.isRunningOutput || taps[app.id] != nil else { continue }
+
             if apply(s, for: app) {
                 clearRebuildFailure(app.id)
             } else {
                 rebuildFailedIDs.insert(app.id)
             }
-            repaired.append(app.id)
         }
         finishRebuildPass(previousFailures: before)
         return repaired

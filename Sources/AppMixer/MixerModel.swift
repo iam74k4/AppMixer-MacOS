@@ -80,6 +80,8 @@ final class MixerModel: ObservableObject {
     private var suppressMasterSyncUntil: Date?
     /// プロセス一覧はまとまって変化するため、少し待ってから一度だけ同期する。
     private var processResyncWorkItem: DispatchWorkItem?
+    /// デバイス構成も同様。機器の抜き差し 1 回で通知は何度も飛ぶ。
+    private var deviceResyncWorkItem: DispatchWorkItem?
     /// マスター音量のポーリング頻度を落とすためのカウンタ。
     private var meterTick: UInt64 = 0
     /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
@@ -124,7 +126,7 @@ final class MixerModel: ObservableObject {
         // 振り分け先のデバイスが抜かれたら既定出力へ戻す。
         // 放置するとそのアプリは音の出口を失って無音のままになる。
         controller.onDeviceListChanged = { [weak self] in
-            MainActor.assumeIsolated { guard let self else { return }; self.handleDeviceListChanged() }
+            MainActor.assumeIsolated { guard let self else { return }; self.scheduleDeviceResync() }
         }
 
         // タップの張り替えに失敗した／復旧した。黙って無音にせず画面に出す。
@@ -348,6 +350,24 @@ final class MixerModel: ObservableObject {
             let metered = controller.hasFreshTap(for: apps[index].app)
             if apps[index].metered != metered { apps[index].metered = metered }
         }
+    }
+
+    /// デバイス構成の変化をまとめて処理する（連続通知を 1 回に束ねる）。
+    ///
+    /// 機器の抜き差し 1 回につき通知は何度も飛ぶ。そのたびに下の処理を走らせると、
+    /// アプリ一覧の再列挙（プロセスごとの sysctl と親 pid 探索）、アイコンの取得、
+    /// TCC の dlopen、SMAppService への問い合わせまでが毎回メインスレッドで動く。
+    ///
+    /// 束ねても判定は遅れない。タップの生死に使う liveDeviceUIDs は
+    /// MixerController 側のリスナーが同期的に更新しているため、
+    /// ここで待つのは画面と保存内容の更新だけ。
+    private func scheduleDeviceResync() {
+        deviceResyncWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { guard let self else { return }; self.handleDeviceListChanged() }
+        }
+        deviceResyncWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     /// デバイスの構成が変わった。振り分け先が無くなったアプリを既定出力へ戻し、
