@@ -45,7 +45,10 @@ final class MixerController {
     /// 実際には無音になっている。復旧するまで再試行し、画面にも印を出す。
     private var rebuildFailedIDs: Set<String> = []
     private var rebuildRetryScheduled = false
-    private var rebuildAttempts = 0
+    /// 張り替えに失敗した回数（アプリごと）。
+    /// 全体で 1 つのカウンタにすると、慢性的に失敗するアプリが 1 つあるだけで
+    /// 直後に失敗した別のアプリの復旧まで最大 30 秒待たされる。
+    private var rebuildAttempts: [String: Int] = [:]
     /// メーター用タップを 1 つずつ解放している最中か。
     private var draining = false
     private var deviceListenerInstalled = false
@@ -71,6 +74,20 @@ final class MixerController {
     /// 既定出力の切り替えに追従できず、いま音が出ていないアプリか。
     func isSilencedByFailedRebuild(id: String) -> Bool {
         rebuildFailedIDs.contains(id)
+    }
+
+    /// 「追従できず無音」の印を外す。実際に音が出る状態へ戻した経路すべてから呼ぶ。
+    ///
+    /// 印を消し忘れると二重に害がある。`hasFreshTap` はこの印だけで false を
+    /// 返すため、(1) 画面に赤い印が出たまま残り、(2) 呼び出し側が「まだタップが
+    /// 無い」と判断して張り直しを繰り返す。集約デバイスの生成/破棄が続くと、
+    /// そのデバイスで再生中の全アプリが音飛びする。
+    ///
+    /// - Returns: 実際に印が外れたら true（通知するかの判断に使う）。
+    @discardableResult
+    private func clearRebuildFailure(_ id: String) -> Bool {
+        rebuildAttempts[id] = nil
+        return rebuildFailedIDs.remove(id) != nil
     }
 
     /// いま存在する出力デバイスの UID。振り分け先が生きているかの判定に使う。
@@ -194,7 +211,7 @@ final class MixerController {
             retireIfNeeded(tap)
         }
         taps.removeValue(forKey: app.id)
-        rebuildFailedIDs.remove(app.id)
+        clearRebuildFailure(app.id)
     }
 
     /// 現在のアプリ一覧に合わせてタップを同期する。
@@ -234,6 +251,9 @@ final class MixerController {
             tap.invalidate()
             retireIfNeeded(tap)
         }
+        // タップを畳んだアプリは通常経路へ戻る。「追従できず無音」ではなく
+        // なったので印を外す。残すと、鳴っているのに赤い印が出たままになる。
+        if clearRebuildFailure(id) { onTapTroubleChanged?() }
 
         guard releasable.count > 1 else {
             draining = false
@@ -279,6 +299,7 @@ final class MixerController {
         }
         states = states.filter { aliveIDs.contains($0.key) }
         rebuildFailedIDs.formIntersection(aliveIDs)
+        rebuildAttempts = rebuildAttempts.filter { aliveIDs.contains($0.key) }
     }
 
     /// 音量設定を反映する。要求どおりの状態にできたら true。
@@ -310,7 +331,7 @@ final class MixerController {
                 tap.invalidate()
                 retireIfNeeded(tap)
                 taps[app.id] = replacement
-                if rebuildFailedIDs.remove(app.id) != nil { onTapTroubleChanged?() }
+                if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
                 return true
             }
             // 張り替えに失敗したら、古いタップを残す方が安全（設定を失わない）。
@@ -323,6 +344,7 @@ final class MixerController {
 
         guard let tap = makeTap(for: app, gain: gain) else { return false }
         taps[app.id] = tap
+        if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
         return true
     }
 
@@ -341,19 +363,30 @@ final class MixerController {
     }
 
     /// 振り分け先が無くなったアプリを既定出力へ戻す。戻したアプリの id を返す。
+    ///
+    /// 状態は必ず既定出力へ書き換える（そこが行き先だと決めたため）。ただし
+    /// 実際に張り直せたかは別で、失敗すると古いタップが消えたデバイスを指した
+    /// ままになり、そのアプリは無音になる。黙って「直した」ことにせず印を付け、
+    /// 再試行の対象に入れる。
     @discardableResult
     func repairMissingRoutes(apps: [AudioApp]) -> [String] {
         refreshLiveDeviceUIDs()
         var repaired: [String] = []
+        let before = rebuildFailedIDs
         for app in apps {
             guard let uid = states[app.id]?.outputDeviceUID,
                   !liveDeviceUIDs.contains(uid) else { continue }
             var s = states[app.id] ?? State()
             s.outputDeviceUID = nil
             states[app.id] = s
-            apply(s, for: app)
+            if apply(s, for: app) {
+                clearRebuildFailure(app.id)
+            } else {
+                rebuildFailedIDs.insert(app.id)
+            }
             repaired.append(app.id)
         }
+        finishRebuildPass(previousFailures: before)
         return repaired
     }
 
@@ -384,11 +417,16 @@ final class MixerController {
             tap.invalidate()
             retireIfNeeded(tap)
             taps[app.id] = replacement
+            // ここで張り直せたということは、もう無音ではない。印を外さないと
+            // hasFreshTap が false を返し続け、0.5 秒ごとに呼ばれるこの経路が
+            // 同じアプリを選び直して集約デバイスを作り直し続ける。
+            if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
             return true
         }
 
         guard let tap = makeTap(for: app, gain: gain) else { return false }
         taps[app.id] = tap
+        if clearRebuildFailure(app.id) { onTapTroubleChanged?() }
         return true
     }
 
@@ -514,7 +552,7 @@ final class MixerController {
             // 出力先を明示しているタップは既定出力の変更と無関係。
             guard oldTap.followsDefaultOutput else { continue }
             if rebuildTap(id: id, replacing: oldTap) {
-                rebuildFailedIDs.remove(id)
+                clearRebuildFailure(id)
             } else {
                 rebuildFailedIDs.insert(id)
             }
@@ -551,19 +589,27 @@ final class MixerController {
         let before = rebuildFailedIDs
         guard !before.isEmpty else { return }
         for id in before {
-            // アプリごと消えたか、既定出力に追従しないタップに差し替わって
-            // いたら、もう追いかける相手がいない。
-            guard let oldTap = taps[id], oldTap.followsDefaultOutput else {
-                rebuildFailedIDs.remove(id)
+            // アプリごと消えたか、既定出力へ向ける必要がなくなっていたら、
+            // もう追いかける相手がいない。
+            //
+            // 判定は「古いタップがどこを指しているか」ではなく「いま state が
+            // どこを指しているか」で行う。振り分け先が引き抜かれて既定出力へ
+            // 戻されたアプリは、古いタップが消えたデバイスを指したままなので、
+            // タップ基準で見ると復旧の対象から外れてしまう。
+            guard let oldTap = taps[id],
+                  (states[id] ?? State()).outputDeviceUID == nil else {
+                clearRebuildFailure(id)
                 continue
             }
-            if rebuildTap(id: id, replacing: oldTap) { rebuildFailedIDs.remove(id) }
+            if rebuildTap(id: id, replacing: oldTap) { clearRebuildFailure(id) }
         }
         finishRebuildPass(previousFailures: before)
     }
 
     private func finishRebuildPass(previousFailures before: Set<String>) {
-        if rebuildFailedIDs.isEmpty { rebuildAttempts = 0 }
+        // 復旧した ID の失敗回数は捨てる。残すと、次に失敗したときに
+        // 前回の回数を引きずって最初から長い間隔で待つことになる。
+        rebuildAttempts = rebuildAttempts.filter { rebuildFailedIDs.contains($0.key) }
         if rebuildFailedIDs != before { onTapTroubleChanged?() }
         scheduleRebuildRetry()
     }
@@ -574,8 +620,14 @@ final class MixerController {
         // 何度も失敗するデバイスに毎秒張り付いても復旧しない。
         // ただし諦めてしまうと対象アプリが無音のまま残るので、
         // 間隔を伸ばしながら試し続ける。
-        let delay = min(1.5 * pow(2.0, Double(rebuildAttempts)), 30.0)
-        rebuildAttempts += 1
+        //
+        // 間隔はいちばん新しく失敗したアプリ（＝試行回数が最も少ないもの）に
+        // 合わせる。全体で 1 つのカウンタにすると、慢性的に失敗するアプリの
+        // バックオフに引きずられて、直後に失敗した別のアプリが最大 30 秒
+        // 無音のまま放置される。
+        let attempts = rebuildFailedIDs.map { rebuildAttempts[$0] ?? 0 }.min() ?? 0
+        let delay = min(1.5 * pow(2.0, Double(attempts)), 30.0)
+        for id in rebuildFailedIDs { rebuildAttempts[id, default: 0] += 1 }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.rebuildRetryScheduled = false
