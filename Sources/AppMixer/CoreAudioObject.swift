@@ -35,8 +35,10 @@ enum CoreAudioObject {
         var dataSize = UInt32(MemoryLayout<T>.size)
         // &value をそのまま渡すと「T がオブジェクト参照を含むかもしれない」と
         // 警告される。ここは生バイトを受け取る場所だと明示して黙らせる。
-        let status = withUnsafeMutableBytes(of: &value) { raw in
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, raw.baseAddress)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(
+                objectID, &address, 0, nil, &dataSize, UnsafeMutableRawPointer(pointer)
+            )
         }
         guard status == noErr else { return defaultValue }
         return value
@@ -60,8 +62,10 @@ enum CoreAudioObject {
         )
         var value = defaultValue
         var dataSize = UInt32(MemoryLayout<T>.size)
-        let status = withUnsafeMutableBytes(of: &value) { raw in
-            AudioObjectGetPropertyData(objectID, &address, 0, nil, &dataSize, raw.baseAddress)
+        let status = withUnsafeMutablePointer(to: &value) { pointer in
+            AudioObjectGetPropertyData(
+                objectID, &address, 0, nil, &dataSize, UnsafeMutableRawPointer(pointer)
+            )
         }
         guard status == noErr else { return nil }
         return value
