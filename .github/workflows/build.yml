@@ -1,0 +1,40 @@
+name: build
+
+# ビルドが通ることだけを見る最小の CI。
+# これが無いと、コンパイルすら確認されていない変更が develop に入りうる。
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# 同じブランチへ続けて push したときは、最新のものだけ走らせる。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Core Audio / AppKit / SwiftUI / ServiceManagement に依存するため
+    # macOS ランナーが要る。Linux では import すら解決できない。
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # 失敗したときに、どのツールチェーンで起きたのかを追えるようにする。
+      - name: ツールチェーンを表示
+        run: |
+          swift --version
+          echo "SDK: $(xcrun --show-sdk-version)"
+
+      # swift build を直に呼ばず make build を通す。開発者が手元で叩くのと
+      # 同じ経路になり、Process Tap API に必要な macOS 14.4 SDK の検査も
+      # 兼ねられる（古い SDK だと "cannot find 'CATapDescription' in scope"
+      # という原因の分かりにくい形で落ちるため）。
+      - name: ビルド
+        run: make build
