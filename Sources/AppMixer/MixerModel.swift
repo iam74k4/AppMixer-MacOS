@@ -86,6 +86,13 @@ final class MixerModel: ObservableObject {
     private var meterTick: UInt64 = 0
     /// 最後に表示更新が来た時刻（閉じられたことの検知に使う）。
     private var lastTick: Date?
+    /// ポップオーバーが表示されているとみなせるか。
+    /// tick が続いている（または onAppear 直後の）間だけ true。閉じられた
+    /// ことは onDisappear か idleWatchdog が lastTick を nil に戻して伝える。
+    private var isPopoverShowing: Bool { lastTick != nil }
+    /// アプリ id -> 取得済みアイコン。一覧を作り直すたびに
+    /// NSRunningApplication / NSWorkspace を引き直さないための持ち越し。
+    private var iconCache: [String: NSImage] = [:]
     private var idleWatchdog: Timer?
     /// メーター用タップの生成に失敗した回数。上限を超えたら諦める。
     private var meteringFailures: [String: Int] = [:]
@@ -186,6 +193,10 @@ final class MixerModel: ObservableObject {
         // 解放中に開き直されたら中断する。
         controller.cancelMeteringRelease()
         meteringFailures.removeAll()
+        // 最初の tick を待たずに「表示中」にする。これから呼ぶ refresh が
+        // 表示中にしか行わない読み直し（権限・自動起動・デバイス一覧）を
+        // この印で判定するため、先に立てておかないと開いた直後の一回が抜ける。
+        lastTick = Date()
         refresh()
     }
 
@@ -222,6 +233,9 @@ final class MixerModel: ObservableObject {
     }
 
     func onDisappear() {
+        // 来ないことがある通知だが、来たなら閉じたと確定している。
+        // idleWatchdog の 2 秒を待たずに「表示中」を下ろす。
+        lastTick = nil
         // 表示していない間は、メーター用に張っただけのタップを解放する。
         // 音量を変えたアプリのタップはそのまま維持する。
         controller.releaseMeteringOnlyTaps()
@@ -257,7 +271,9 @@ final class MixerModel: ObservableObject {
                 controller.seed(saved, for: app)
             }
         }
-        controller.prune(aliveIDs: Set(enumerated.map(\.id)))
+        let aliveIDs = Set(enumerated.map(\.id))
+        controller.prune(aliveIDs: aliveIDs)
+        iconCache = iconCache.filter { aliveIDs.contains($0.key) }
         // 音声ヘルパーが入れ替わったアプリのタップを張り直す
         controller.syncTaps(with: enumerated)
 
@@ -277,7 +293,7 @@ final class MixerModel: ObservableObject {
             let state = controller.state(forID: app.id)
             return DisplayApp(
                 app: app,
-                icon: app.icon,
+                icon: cachedIcon(for: app),
                 volume: state.volume,
                 muted: state.muted,
                 level: controller.level(forID: app.id),
@@ -290,11 +306,31 @@ final class MixerModel: ObservableObject {
                     && !DuckingDetector.isCommunicationApp(app)
             )
         }
+        // ここから下は表示のためだけの読み直しで、閉じている間は誰も見ない。
+        // refresh はプロセス一覧が変わるたび（ブラウザのタブ操作でも）呼ばれる
+        // ため、閉じている間まで TCC への問い合わせ、servicemanagementd への
+        // XPC、デバイス列挙を繰り返さない。開いた瞬間は onAppear が同じ経路を
+        // 通るので、表示はそこで追いつく。
+        guard isPopoverShowing else { return }
         outputDevices = AudioDeviceEnumerator.outputDevices()
 
         refreshMaster()
         permission = AudioCapturePermission.current()
         refreshLaunchAtLogin()
+    }
+
+    /// アイコンを取り出す（無ければ取得して覚える）。
+    ///
+    /// AudioApp.icon は NSRunningApplication か NSWorkspace を引く。一覧は
+    /// プロセスの増減のたびに作り直されるため、毎回引き直すと常駐中ずっと
+    /// その繰り返しになる。アイコンはアプリの生存中に変わらないものとして
+    /// 持ち越す（消えたアプリのぶんは refresh が捨てる）。
+    /// 取れなかったアプリは覚えず、次の作り直しでまた試す。
+    private func cachedIcon(for app: AudioApp) -> NSImage? {
+        if let icon = iconCache[app.id] { return icon }
+        guard let icon = app.icon else { return nil }
+        iconCache[app.id] = icon
+        return icon
     }
 
     // MARK: - デバイスごとの音量記憶
