@@ -228,6 +228,9 @@ final class MixerController {
     /// 待ち行列から 1 つだけタップを張り、残りは間隔をあけて続ける。
     /// releaseMeteringOnlyTaps と同じ理由で、まとめて作らない。
     private func attachNextDuckTap() {
+        // 0.08 秒後の実行が予約済みなら、そちらに任せる。予約中に外から
+        // 呼ばれるたびに 1 つ処理すると、待ち行列に分けた間隔が詰まる。
+        guard !duckAttachScheduled else { return }
         // 待っている間に解除されたら、残りはもう要らない。
         guard duckMultiplier < 1.0 else {
             duckPending.removeAll()
