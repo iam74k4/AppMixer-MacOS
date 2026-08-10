@@ -105,6 +105,13 @@ final class MixerModel: ObservableObject {
     /// 1 秒以内に更新されている。
     private var lastEnumeratedApps: [AudioApp] = []
     private var lastExcludedIDs: Set<String> = []
+    /// 保存待ちのアプリ設定。スライダーのドラッグ中は値が変わるたびに
+    /// setVolume が呼ばれるため、その場で保存すると JSON の復号・符号化と
+    /// UserDefaults への書き込みがイベントレートで走る。音への反映は即座に
+    /// 行い、保存だけ手が止まるのを待って 1 回にする。
+    private var pendingSaves: [String: (app: AudioApp, work: DispatchWorkItem)] = [:]
+    /// 「下げる音量」の保存の予約。理由は pendingSaves と同じ。
+    private var duckLevelSaveWork: DispatchWorkItem?
 
     private static let duckingEnabledKey = "appmixer.ducking.enabled"
     private static let duckLevelKey = "appmixer.ducking.level"
@@ -149,12 +156,17 @@ final class MixerModel: ObservableObject {
 
         // タップ中のアプリは .mutedWhenTapped で通常経路から外れているため、
         // 後始末をせずに終了するとそのアプリが無音のままになる。
+        // 保存待ちの設定もここで書き切る。
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { guard let self else { return }; self.controller.shutdown() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.flushPendingSaves()
+                self.controller.shutdown()
+            }
         }
 
         startIdleWatchdog()
@@ -546,7 +558,7 @@ final class MixerModel: ObservableObject {
 
     func setDuckLevel(_ level: Float) {
         duckLevel = max(0.0, min(1.0, level))
-        defaults.set(duckLevel, forKey: Self.duckLevelKey)
+        scheduleDuckLevelSave()
         // 発動していないなら 1 秒ごとの判定に任せる。スライダーを動かすたびに
         // プロセス一覧を引き直すのは重い。
         guard duckingReason != nil else { return }
@@ -567,6 +579,22 @@ final class MixerModel: ObservableObject {
             duckingReason = nil
             applyDucking(active: false, apps: all, excluded: lastExcludedIDs)
         }
+    }
+
+    /// 「下げる音量」の保存を予約する。スライダーは値が変わるたびに
+    /// setDuckLevel を呼ぶため、その場で書くと設定デーモンへの書き込みが
+    /// イベントレートで走る。倍率の反映は即座、保存だけ束ねる。
+    private func scheduleDuckLevelSave() {
+        duckLevelSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.duckLevelSaveWork = nil
+                self.defaults.set(self.duckLevel, forKey: Self.duckLevelKey)
+            }
+        }
+        duckLevelSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 
     func setDuckOnMicrophone(_ enabled: Bool) {
@@ -832,7 +860,13 @@ final class MixerModel: ObservableObject {
         let ok = controller.setVolume(volume, for: app)
         // 効いていない値を保存しない。保存すると、次回以降も「30% のはずが
         // 100% で鳴る」状態が復元され続ける。
-        if ok { saveSetting(for: app) }
+        if ok {
+            scheduleSave(for: app)
+        } else {
+            // 反映に失敗したら予約も取り下げる。予約は発火時点の状態を
+            // 書くため、残すと反映できなかった値まで保存されてしまう。
+            pendingSaves.removeValue(forKey: app.id)?.work.cancel()
+        }
         updateRow(app.id) {
             $0.volume = volume
             $0.metered = controller.hasFreshTap(for: app)
@@ -895,7 +929,9 @@ final class MixerModel: ObservableObject {
     }
 
     func quit() {
-        // 終了通知が届く前に確実にタップを解除し、各アプリの音声を戻す。
+        // 終了通知が届く前に、保存待ちの設定を書き切り、確実にタップを
+        // 解除して各アプリの音声を戻す。
+        flushPendingSaves()
         controller.shutdown()
         NSApp.terminate(nil)
     }
@@ -996,7 +1032,48 @@ final class MixerModel: ObservableObject {
         loadStored(for: app).settings
     }
 
+    /// 保存を予約する（0.5 秒以内に次が来たら置き換え）。saveSetting は
+    /// 発火時点の state を書くので、予約が置き換わっても最終値は失われない。
+    private func scheduleSave(for app: AudioApp) {
+        pendingSaves[app.id]?.work.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pendingSaves[app.id] = nil
+                // 予約から発火までの間にアプリごと消えて prune された場合は
+                // 書かない。state が無いまま saveSetting を呼ぶと、既定値
+                // （100%・ミュート解除）で保存済みの記憶を上書きしてしまう。
+                guard self.controller.states[app.id] != nil else { return }
+                self.saveSetting(for: app)
+            }
+        }
+        pendingSaves[app.id] = (app, work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// 予約中の保存をその場で書き切る。終了の経路で呼ぶこと。
+    /// 呼ばないと、終了直前の操作だけが保存されないまま失われる。
+    private func flushPendingSaves() {
+        let pending = pendingSaves
+        pendingSaves.removeAll()
+        for entry in pending.values {
+            entry.work.cancel()
+            // 予約後に消えたアプリは書かない（予約の発火側と同じ理由）。
+            guard controller.states[entry.app.id] != nil else { continue }
+            saveSetting(for: entry.app)
+        }
+        if duckLevelSaveWork != nil {
+            duckLevelSaveWork?.cancel()
+            duckLevelSaveWork = nil
+            defaults.set(duckLevel, forKey: Self.duckLevelKey)
+        }
+    }
+
     private func saveSetting(for app: AudioApp) {
+        // ここで直に書くので、同じアプリの予約は同じ内容の書き直しにしか
+        // ならない。取り下げる（ミュートや出力先の変更は即時保存のため、
+        // 直前のドラッグの予約とここで合流する）。
+        pendingSaves.removeValue(forKey: app.id)?.work.cancel()
         guard let key = storageKey(for: app) else { return }
         let loaded = loadStored(for: app)
         // 理解できない保存内容には触れない。ここで書くと、新しい版の
