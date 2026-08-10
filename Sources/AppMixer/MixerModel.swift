@@ -336,6 +336,33 @@ final class MixerModel: ObservableObject {
         refresh(with: enumerated)
     }
 
+    /// 振り分けを解いたアプリに、既定出力で覚えていた音量を入れ直す。
+    ///
+    /// これが無いと、振り分け先で使っていた音量をそのまま既定出力の記憶として
+    /// 書き込んでしまい、既定出力に覚えていた音量が黙って消える。
+    /// メニューから手動で「既定の出力」へ戻したときは setOutputDevice() が
+    /// 同じことをしている。自動復旧のときだけ挙動が違う理由は無い。
+    ///
+    /// 記憶が無いデバイスへ移った場合は何もしない。いまの音量がそのまま
+    /// 引き継がれて記憶される（applyMemoryForCurrentDevice と同じ方針）。
+    private func applyDefaultDeviceMemory(for app: AudioApp) {
+        guard let device = currentDefaultDeviceUID,
+              let remembered = storedSettings(for: app).perDevice[device] else { return }
+
+        // 振り分け先は既に nil へ直っている。音量とミュートだけ入れ替える。
+        var state = controller.state(forID: app.id)
+        state.volume = remembered.volume
+        state.muted = remembered.muted
+
+        // 鳴っていないアプリにタップは張らない。controller.setVolume() を使うと
+        // 張ってしまうため、状態の入れ方を再生中かどうかで分ける。
+        if app.isRunningOutput || controller.hasTap(forID: app.id) {
+            controller.restore(state, for: app)
+        } else {
+            controller.seed(state, for: app)
+        }
+    }
+
     /// タップの張り替え失敗（＝いま無音）の印を一覧へ反映する。
     /// 復旧したら印は消える。
     private func syncTapTrouble() {
@@ -382,6 +409,9 @@ final class MixerModel: ObservableObject {
         let enumerated = AudioAppEnumerator.enumerate()
         let repaired = controller.repairMissingRoutes(apps: enumerated)
         for app in enumerated where repaired.contains(app.id) {
+            // 保存より先に音量を入れ替えること。順序が逆だと、振り分け先で
+            // 使っていた音量を既定出力の記憶として書き込んでしまう。
+            applyDefaultDeviceMemory(for: app)
             saveSetting(for: app)
         }
         refresh(with: enumerated)
