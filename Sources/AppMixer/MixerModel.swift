@@ -497,8 +497,11 @@ final class MixerModel: ObservableObject {
     func setDuckLevel(_ level: Float) {
         duckLevel = max(0.0, min(1.0, level))
         defaults.set(duckLevel, forKey: Self.duckLevelKey)
-        // 引き金の判定からやり直す。100% まで戻したときは「絞っています」の
-        // 帯と行の印をその場で消す必要があり、深さだけ変えたときは倍率を
+        // 発動していないなら 1 秒ごとの判定に任せる。スライダーを動かすたびに
+        // プロセス一覧を引き直すのは重い。
+        guard duckingReason != nil else { return }
+        // 発動中は引き金の判定からやり直す。100% まで戻したときは「絞っています」
+        // の帯と行の印をその場で消す必要があり、深さだけ変えたときは倍率を
         // 入れ直す必要がある。前者は次のタイマーまで嘘の表示が残っていた。
         evaluateDucking(forceApply: true)
     }
@@ -533,13 +536,18 @@ final class MixerModel: ObservableObject {
         if reason != duckingReason {
             duckingReason = reason
             applyDucking(active: reason != nil, apps: all)
-        } else if forceApply {
-            // 引き金は変わらず深さだけ変わった。倍率を入れ直す。
-            applyDucking(active: reason != nil, apps: all)
         } else if reason != nil {
-            // 発動中に鳴り始めたアプリも絞る。
-            controller.syncTaps(with: all)
+            if forceApply {
+                // 引き金は変わらず深さだけ変わった。倍率を入れ直す。
+                applyDucking(active: true, apps: all)
+            } else {
+                // 発動中に鳴り始めたアプリも絞る。
+                controller.syncTaps(with: all)
+            }
         }
+        // 未発動のまま変化が無ければ何もしない。ここで applyDucking(active: false)
+        // を通すと releaseMeteringOnlyTaps() まで走り、メーター用のタップを
+        // 巻き添えで畳んでしまう。
     }
 
     private func applyDucking(active: Bool, apps all: [AudioApp]) {
