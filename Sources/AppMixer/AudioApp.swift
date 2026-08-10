@@ -10,20 +10,18 @@ struct AudioApp: Identifiable, Equatable {
     let bundleID: String?
     let name: String
     let processObjectIDs: [AudioObjectID] // このアプリの全音声プロセスオブジェクト（タップ対象）
-    let pids: [pid_t]
     let isRunningOutput: Bool             // いずれかのプロセスが現在出力中か
     let isRunningInput: Bool              // いずれかのプロセスが現在マイクを使用中か
 
     private let iconAppPID: pid_t?        // アイコン取得用の本体アプリ pid
 
     init(id: String, bundleID: String?, name: String,
-         processObjectIDs: [AudioObjectID], pids: [pid_t],
+         processObjectIDs: [AudioObjectID],
          isRunningOutput: Bool, isRunningInput: Bool, iconAppPID: pid_t?) {
         self.id = id
         self.bundleID = bundleID
         self.name = name
         self.processObjectIDs = processObjectIDs
-        self.pids = pids
         self.isRunningOutput = isRunningOutput
         self.isRunningInput = isRunningInput
         self.iconAppPID = iconAppPID
@@ -61,7 +59,6 @@ enum AudioAppEnumerator {
             var name: String
             var iconAppPID: pid_t?
             var objectIDs: [AudioObjectID] = []
-            var pids: [pid_t] = []
             var runningOutput = false
             var runningInput = false
             init(bundleID: String?, name: String, iconAppPID: pid_t?) {
@@ -100,7 +97,6 @@ enum AudioAppEnumerator {
                 bundleID: bundleID, name: name, iconAppPID: owningApp?.processIdentifier
             )
             builder.objectIDs.append(objectID)
-            builder.pids.append(pid)
             if isRunningOutput(objectID) { builder.runningOutput = true }
             if isRunningInput(objectID) { builder.runningInput = true }
             builders[key] = builder
@@ -112,7 +108,6 @@ enum AudioAppEnumerator {
                 bundleID: b.bundleID,
                 name: b.name,
                 processObjectIDs: b.objectIDs,
-                pids: b.pids,
                 isRunningOutput: b.runningOutput,
                 isRunningInput: b.runningInput,
                 iconAppPID: b.iconAppPID

@@ -147,27 +147,6 @@ enum CoreAudioObject {
 
     // MARK: - 便利メソッド
 
-    /// pid からプロセス AudioObjectID へ変換（qualifier として pid を渡す）。
-    static func processObject(for pid: pid_t) -> AudioObjectID {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var pidValue = pid
-        var objectID: AudioObjectID = .unknown
-        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
-        let status = withUnsafeMutablePointer(to: &pidValue) { qualifier in
-            AudioObjectGetPropertyData(
-                .system, &address,
-                UInt32(MemoryLayout<pid_t>.size), qualifier,
-                &dataSize, &objectID
-            )
-        }
-        guard status == noErr else { return .unknown }
-        return objectID
-    }
-
     /// システムの既定出力デバイス。
     static func defaultOutputDeviceID() -> AudioObjectID {
         read(.system, selector: kAudioHardwarePropertyDefaultOutputDevice, defaultValue: AudioObjectID.unknown)

@@ -256,16 +256,6 @@ final class MixerController {
         apply(state, for: app)
     }
 
-    func reset(for app: AudioApp) {
-        states[app.id] = State()
-        if let tap = taps[app.id] {
-            tap.invalidate()
-            retireIfNeeded(tap)
-        }
-        taps.removeValue(forKey: app.id)
-        clearRebuildFailure(app.id)
-    }
-
     /// 現在のアプリ一覧に合わせてタップを同期する。
     /// プロセスオブジェクトが入れ替わったアプリはタップを張り直す。
     func syncTaps(with apps: [AudioApp]) {
