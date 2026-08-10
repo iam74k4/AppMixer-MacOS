@@ -223,6 +223,12 @@ final class MixerController {
             let beingDucked = duckMultiplier < 1.0
                 && !duckExcludedIDs.contains(app.id) && app.isRunningOutput
             guard state.isCustomized || beingDucked else { continue }
+            // 鳴っていないアプリに新しくタップは張らない。停止中のアプリにも
+            // 保存済みの設定を入れてあるため、ここで一斉に張ると集約デバイスが
+            // まとめて作られ、そのデバイスで再生中の音がすべて飛ぶ。
+            // 鳴り始めれば一覧の作り直しを経てここへ戻ってくる。
+            // 既にタップを持っているものは、張り替えが要るので通す。
+            guard app.isRunningOutput || taps[app.id] != nil else { continue }
             apply(state, for: app)
         }
     }
