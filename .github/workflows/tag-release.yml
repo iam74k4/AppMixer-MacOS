@@ -1,18 +1,38 @@
 name: tag-release
 
-# 審査を通って配信が始まったあとに、リリースの印を付ける手動ワークフロー。
-# main の現在のバージョンでタグを打ち、CHANGELOG の該当節を本文にした
-# GitHub Release を作る。
+# 配信が始まった版に、タグと GitHub Release で印を付ける。
+#
+# 定期的に App Store Connect を見て、main のバージョンが配信中（READY_FOR_SALE）に
+# なっていて、まだタグが無ければ打つ。審査の所要時間は読めないので、
+# 「終わったら人が実行する」ではなく「終わったのを見つけたら勝手に打つ」形にする。
 #
 # 先にタグを打たないのは docs/app-store.md の方針どおり。リジェクトされた場合に
-# 「タグはあるのに世に出ていない」版を残さないため、配信開始を人が確認してから
-# Actions タブ → tag-release → Run workflow で実行する。
+# 「タグはあるのに世に出ていない」版を残さないため。
+#
+# 注意: cron はこのリポジトリの既定ブランチ（develop）にあるファイルで動く。
+# このワークフローを直したら develop に入るまで反映されない。
 
 on:
+  schedule:
+    # 3 時間おき。審査の結果は分単位で追う必要が無い。
+    # 分をずらしているのは、毎時 0 分に集まる混雑を避けるため。
+    - cron: "17 */3 * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "App Store の状態を見ずにタグを打つ"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
+
+env:
+  ASC_BUNDLE_ID: io.github.iam74k4.AppMixer
 
 jobs:
   tag:
@@ -21,27 +41,66 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # 見るのは常に main の中身。cron は develop から起動されるため明示する。
           ref: main
           fetch-depth: 0
 
-      - name: タグと GitHub Release を作る
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: 打つべきタグがあるか調べる
+        id: check
         run: |
           # ubuntu には PlistBuddy が無いので、キーの次行の <string> を読む。
           VERSION=$(grep -A1 '<key>CFBundleShortVersionString</key>' bundle/Info.plist \
                     | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')
-          TAG="v$VERSION"
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "error: $TAG は既にあります。bundle/Info.plist のバージョンを確認してください。"
-            exit 1
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "todo=false" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION のタグは既にあります。何もしません。"
+          else
+            echo "todo=true" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION のタグがまだありません。配信状況を確認します。"
           fi
 
-          # CHANGELOG から「## [X.Y.Z]」の節だけを抜き出してリリースノートにする。
-          awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
-            /^## \[/ { flag = 0 }
-            flag' CHANGELOG.md > /tmp/notes.md
+      - uses: actions/setup-python@v5
+        if: steps.check.outputs.todo == 'true' && !inputs.force
+        with:
+          python-version: "3.12"
+
+      - name: 配信が始まっているか確認する
+        id: live
+        if: steps.check.outputs.todo == 'true' && !inputs.force
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          pip install --quiet "pyjwt[crypto]"
+          # 配信前なら終了コード 2。審査待ちは失敗ではないので、ここでは落とさない。
+          set +e
+          STATE=$(python3 scripts/asc.py state \
+            --version "${{ steps.check.outputs.version }}" --require-live)
+          CODE=$?
+          set -e
+          echo "state=$STATE"
+          if [ "$CODE" -eq 0 ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif [ "$CODE" -eq 2 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "まだ配信前です。次の実行でまた見ます。"
+          else
+            exit "$CODE"
+          fi
+
+      - name: タグと GitHub Release を作る
+        if: >-
+          steps.check.outputs.todo == 'true'
+          && (inputs.force || steps.live.outputs.ready == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          # CHANGELOG の該当節をそのままリリースノートにする。
+          ./scripts/changelog-section.sh "$VERSION" > /tmp/notes.md
           if [ ! -s /tmp/notes.md ]; then
             echo "warning: CHANGELOG.md に [$VERSION] の節が見つかりません。ノート無しで作ります。"
           fi
