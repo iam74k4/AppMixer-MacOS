@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>AppMixer</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.iam74k4.AppMixer</string>
+    <string>com.iam74k4.AppMixer</string>
     <key>CFBundleExecutable</key>
     <string>AppMixer</string>
     <key>CFBundlePackageType</key>

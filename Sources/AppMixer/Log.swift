@@ -7,7 +7,7 @@ import os
 // アプリ名やバンドル ID は既定で伏せられる os.Logger を使い、
 // 伏せ字を外すのは開発者が明示的に設定したときだけにする。
 enum AppLog {
-    private static let subsystem = "io.github.iam74k4.AppMixer"
+    private static let subsystem = "com.iam74k4.AppMixer"
 
     /// タップの生成/破棄まわり。
     static let audio = Logger(subsystem: subsystem, category: "audio")

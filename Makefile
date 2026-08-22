@@ -111,7 +111,7 @@ run: sign
 # Process Tap と集約デバイスの生成がここで通らなければ、App Store には出せない。
 #
 #   make run-sandboxed IDENTITY="AppMixer Dev"
-#   log stream --predicate 'subsystem == "io.github.iam74k4.AppMixer"'
+#   log stream --predicate 'subsystem == "com.iam74k4.AppMixer"'
 run-sandboxed: bundle
 	@codesign --force --sign "$(IDENTITY)" \
 		--entitlements bundle/$(APP_NAME).mas.entitlements \
