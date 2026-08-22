@@ -1,8 +1,9 @@
 # リリースフロー
 
-`main` へマージすると App Store Connect へビルドが自動アップロードされる仕組みと、
-その前後で人がやることをまとめる。App Store 提出そのものの背景（サンドボックス、
-審査メモ、失うもの）は `docs/app-store.md` を参照。
+`develop` を `main` へマージすると、そこから先は自動で進む。ビルド、署名、
+App Store Connect へのアップロード、審査への提出、配信後のタグ打ちまで、
+人が押すボタンは無い。App Store 提出そのものの背景（サンドボックス、審査メモ、
+失うもの）は `docs/app-store.md` を参照。
 
 ---
 
@@ -12,37 +13,43 @@
 develop で開発
    │  バージョンを上げ、CHANGELOG を整える
    ▼
-PR: develop → main ─ マージ ─▶ GitHub Actions (release.yml)
-                                  │  make mas で .pkg を作り、
-                                  │  App Store Connect API キーでアップロード
+PR: develop → main ─ マージ ─▶ release.yml
+                                  │
+                                  ├─ upload (macOS)
+                                  │    make mas で .pkg を作り、
+                                  │    App Store Connect へ送る
+                                  │
+                                  └─ submit (Linux)
+                                       ビルドの処理を待ち、
+                                       バージョンを作り、
+                                       CHANGELOG をリリースノートに入れ、
+                                       審査に提出する
                                   ▼
-                            App Store Connect
-                                  │  （人）ビルドを選び、審査に提出
+                              Apple の審査
+                                  │  通れば自動で配信開始（AFTER_APPROVAL）
                                   ▼
-                              審査 → 配信開始
-                                  │  （人）配信を確認したら
-                                  ▼
-                    GitHub Actions (tag-release.yml) を手動実行
-                       タグ v<version> と GitHub Release を作成
+                            tag-release.yml（3 時間おき）
+                               配信中を見つけたら
+                               タグ v<version> と GitHub Release を作る
 ```
-
-役割分担は次のとおり。
 
 | 誰が | 何を |
 |---|---|
-| 自動（release.yml） | ビルド、署名、.pkg 作成、App Store Connect へのアップロード |
-| 人（App Store Connect の Web） | 審査への提出、リリースノート等のメタデータ、配信確認 |
-| 自動（tag-release.yml、人が起動） | タグ打ちと GitHub Release の作成 |
+| 自動（release.yml / upload） | ビルド、署名、.pkg 作成、アップロード |
+| 自動（release.yml / submit） | 処理待ち、バージョン作成、リリースノート、**審査への提出** |
+| 自動（tag-release.yml） | 配信を検知してタグと GitHub Release を作成 |
+| 人 | バージョンを上げる、CHANGELOG を書く、リジェクトされたときの対応 |
 
 タグを最後に打つのは `docs/app-store.md` の方針どおり。リジェクトされた場合に
 「タグはあるのに世に出ていない」版を残さないため。
 
-同じバージョンのタグが既にあるときは release.yml はアップロードせずに終わる。
-そのため、リリース後にドキュメント修正だけを main へ入れても二重アップロードは
-起きない。同じバージョンを出し直したいとき（アップロード後に不備が見つかった等）は
-`bundle/Info.plist` は変えずに再マージすればよいが、App Store はビルド番号の重複を
-弾くので、その場合は一度 Web の Transporter 経由で `BUILD_NUMBER=<数値>` を渡した
-手動ビルドにするか、パッチバージョンを上げるのが簡単。
+### 二重に出さないための歯止め
+
+- `main` のバージョンに対応するタグが既にあれば、release.yml は何もしない。
+  リリース後にドキュメント修正だけを main へ入れても、二重アップロードは起きない。
+- 同じバージョンが App Store Connect で既に配信中なら、submit ジョブは
+  「バージョンを上げてください」と言って止まる。
+- tag-release.yml はタグが既にあれば即座に終わる。
 
 ---
 
@@ -66,12 +73,10 @@ PR: develop → main ─ マージ ─▶ GitHub Actions (release.yml)
 App Store Connect → **ユーザとアクセス** → **統合**（Integrations）→
 **App Store Connect API** → チームキー → **+**。
 
-- ロールは **App Manager**（アップロードに必要な最小ロール）
+- ロールは **App Manager**。アップロードだけなら Developer でも足りるが、
+  審査への提出とバージョンの作成には App Manager が要る
 - 作成すると **Issuer ID** と **キー ID** が表示され、**.p8 ファイルは一度しか
   ダウンロードできない**。安全な場所に保管する
-
-このキーは Web の操作（審査提出やメタデータ編集）を将来自動化するときにも
-そのまま使える（後述）。
 
 ### 3. GitHub Secrets に入れる
 
@@ -96,58 +101,111 @@ base64 -i distribution.p12 | pbcopy         # Secret に貼り付け
 base64 -i AppMixer.provisionprofile | pbcopy
 ```
 
+### 4. 振る舞いを変えたいとき（Variables、任意）
+
+同じ画面の **Variables** タブで設定する。既定のままでよければ何もしなくてよい。
+
+| 変数名 | 既定 | 効果 |
+|---|---|---|
+| `ASC_AUTO_SUBMIT` | （未設定 = 提出する） | `false` にすると、アップロードだけして審査に出さない |
+| `ASC_RELEASE_TYPE` | `AFTER_APPROVAL` | `MANUAL` にすると、審査を通っても自分で配信開始を押すまで公開されない |
+
+`ASC_RELEASE_TYPE=MANUAL` にした場合、審査通過後に App Store Connect で
+「このバージョンをリリース」を押すまで配信は始まらない。tag-release.yml は
+配信が始まるまでタグを打たないので、押し忘れるとタグも付かない。
+
+### 5. App Store Connect（Web）でしかできない初回設定
+
+- アプリレコードの作成、価格設定、App Privacy の回答
+- スクリーンショットと説明文
+- 契約・税金・口座情報
+
+ここが済んでいないと、submit ジョブはバージョンを作れずに止まる。
+
 設定できたら、main へマージする前に Actions タブ → release → **Run workflow** で
-疎通確認ができる（署名とアップロードまで実際に走るので、出したくない版のときは
-やらないこと）。
+疎通確認ができる。「審査に出すところまでやる」のチェックを外せば、アップロードだけ
+試せる。
 
 ---
 
 ## 毎回のリリース手順
 
+人がやるのは 2 つだけ。
+
 1. **develop で仕上げる**
    - `bundle/Info.plist` の `CFBundleShortVersionString` を上げる
      （ビルド番号は Makefile が導出するので触らない）
-   - `CHANGELOG.md` の「未リリース」を新しいバージョン見出しに移し、日付を入れる
+   - `CHANGELOG.md` の「未リリース」を新しいバージョン見出しに移し、日付を入れる。
+     **この節がそのまま App Store のリリースノートと GitHub Release の本文になる**
    - `make run-sandboxed` でサンドボックス動作を確認する（`docs/app-store.md` 参照）
-2. **PR: develop → main** を作ってマージする
-   - マージで release.yml が走り、App Store Connect にビルドが上がる
-3. **App Store Connect（Web）で審査に提出する**
-   - 処理が終わったビルドを新しいバージョンに紐づけ、リリースノートを書き、提出
-   - 審査メモの書き方は `docs/app-store.md` の「審査に出すときに書くこと」
-4. **配信が始まったら** Actions タブ → tag-release → **Run workflow**
-   - `v<version>` のタグと、CHANGELOG の該当節を本文にした GitHub Release ができる
+2. **PR: develop → main を作ってマージする**
+
+あとは待つ。審査に通れば配信が始まり、3 時間以内に tag-release.yml が
+`v<version>` のタグと GitHub Release を作る。
+
+### リジェクトされたら
+
+自動では何も起きない（`DEVELOPER_REJECTED` などの状態で止まり、tag-release.yml は
+タグを打たない）。直したうえで、パッチバージョンを上げて develop → main を
+やり直すのが素直。App Store Connect で直接返答して解決した場合は、配信が始まれば
+tag-release.yml がタグを打つので、こちらで何かする必要はない。
 
 ---
 
-## App Store Connect API でできること・できないこと
+## 中身
 
-いま自動化しているのは**ビルドのアップロード**だけ（release.yml が
-`xcrun altool --upload-app` を API キー認証で呼ぶ）。同じキーで、必要になれば
-ここまで広げられる。
+### `scripts/asc.py`
 
-| できること | 手段 |
+App Store Connect API を叩く小さな道具。3 つの操作だけを持つ。
+
+| 操作 | 何をするか |
 |---|---|
-| ビルドのアップロード | altool / Transporter / REST（2025 年から Build Upload API が公式に追加） |
-| バージョン作成・リリースノート等のメタデータ更新 | REST API、または fastlane `deliver` |
-| 審査への提出・リリース方式（手動/自動/段階的）の設定 | REST API、fastlane `deliver` |
-| 審査状況の取得（通知の自動化など） | REST API |
-| 売上・ダウンロードレポートの取得 | REST API |
+| `wait-build` | アップロードしたビルドの処理（`processingState`）が `VALID` になるのを待つ |
+| `submit` | バージョンを作り、ビルドを紐づけ、リリースノートを入れ、審査に出す |
+| `state` | いまそのバージョンがどう扱われているかを表示する（`--require-live` で判定にも使う） |
 
-Web でしかできないこと（自動化の対象外）:
+認証は API キーから作る ES256 の JWT。依存は PyJWT だけで、HTTP は標準ライブラリ。
+fastlane を持ち込むと metadata ディレクトリ一式をリポジトリで管理することになるため、
+必要な部分だけを自前で持っている。
 
-- 初回のアプリレコード作成、価格設定、App Privacy の回答
-- 契約・税金・口座情報
-- スクリーンショットの初回整備（API でも更新はできるが、初回は Web が早い）
+審査への提出は 3 手に分かれている（入れ物を作る → バージョンを入れる →
+`submitted=true` にする）。最後の一手を忘れると「作ったのに出ていない」状態になるので、
+手で API を叩くときは注意する。
 
-**次の一手として現実的なのは「審査提出まで自動化」**。fastlane `deliver` に
-API キーを渡せば、アップロード済みビルドの紐付け → リリースノート反映 →
-提出までを 1 コマンドにできる。ただし審査メモやスクリーンショットの管理を
-リポジトリに持ち込むことになるので、リリース頻度が上がってから考えれば十分。
+### `scripts/changelog-section.sh`
+
+`CHANGELOG.md` から `## [X.Y.Z]` の節だけを取り出す。App Store のリリースノートと
+GitHub Release の本文の両方がこれを使う。二か所で別々に書くと食い違うため。
+
+### cron の注意
+
+`tag-release.yml` の `schedule` は、**このリポジトリの既定ブランチ（`develop`）に
+あるファイル**で動く。ワークフローを直したら、develop に入るまで反映されない。
+
+また GitHub は、60 日間まったく動きの無いリポジトリで scheduled workflow を
+自動的に止める。長く触っていない状態でリリースしたときは、Actions タブで
+有効になっているかを確認する（止まっていても、tag-release は手動実行できる）。
+
+---
+
+## この先やれること
+
+| やれること | 手段 |
+|---|---|
+| 審査結果を Slack / メールに流す | `scripts/asc.py state` を cron で回して通知する |
+| 審査状態の変化を待たずに拾う | App Store Connect の Webhook（公開 URL の受け口が要る） |
+| スクリーンショットや説明文もリポジトリで管理する | fastlane `deliver` に寄せる |
+| 段階的リリース（Phased Release） | `appStoreVersionPhasedReleases` を叩く |
+
+Webhook を使えば 3 時間おきの巡回は要らなくなるが、受け口となる公開の HTTPS
+エンドポイントが必要で、GitHub の `repository_dispatch` は認証ヘッダを求めるため
+そのままでは繋がらない。中継を 1 つ立てるだけの価値が出るのは、リリース頻度が
+上がってから。
 
 ### altool が使えなくなったら
 
 `altool` は非推奨扱いが続いており、いずれ Xcode から消える可能性がある。
-その場合の乗り換え先（どちらも同じ API キーで動く）:
+乗り換え先（どちらも同じ API キーで動く）:
 
 - **fastlane**（GitHub の macOS ランナーに同梱）:
 
@@ -159,12 +217,17 @@ API キーを渡せば、アップロード済みビルドの紐付け → リ�
 
 - **App Store Connect の Build Upload API**（REST）を直接呼ぶ
 
+差し替えるのは release.yml の「App Store Connect へアップロード」ステップだけで、
+submit 以降はそのまま使える。
+
 ---
 
 ## 関連ファイル
 
-- `.github/workflows/release.yml` — main マージでアップロード
-- `.github/workflows/tag-release.yml` — 配信開始後のタグ打ち（手動起動）
+- `.github/workflows/release.yml` — main マージでアップロードし、審査に出す
+- `.github/workflows/tag-release.yml` — 配信を検知してタグと GitHub Release を作る
 - `.github/workflows/build.yml` — 通常のビルド確認 CI
+- `scripts/asc.py` — App Store Connect API を叩く道具
+- `scripts/changelog-section.sh` — CHANGELOG から該当バージョンの節を取り出す
 - `Makefile` — `make mas` が提出物を作る本体
 - `docs/app-store.md` — App Store 提出の背景と審査まわり
