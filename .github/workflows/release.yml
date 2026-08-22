@@ -1,9 +1,12 @@
 name: release
 
-# main へのマージで、App Store 提出用の .pkg を作って App Store Connect へ
-# 自動アップロードする。審査への提出とタグ打ちはここではやらない
-# （docs/app-store.md の方針どおり、配信が始まってから tag-release.yml で印を付ける）。
+# main へのマージで、App Store 提出用の .pkg を作り、App Store Connect へ
+# アップロードして、そのまま審査に出すところまでを自動で進める。
 #
+#   upload  … 署名して .pkg を作り、App Store Connect へ送る（macOS ランナー）
+#   submit  … 処理の終了を待ち、バージョンにビルドを紐づけ、審査に出す（Linux）
+#
+# 配信が始まったあとのタグ打ちは tag-release.yml が引き取る。
 # 必要な Secrets は docs/release-flow.md にまとめてある。未設定のまま main へ
 # マージすると署名の段階で落ちる（プロダクトには影響しない）。
 
@@ -12,6 +15,11 @@ on:
     branches: [main]
   # Secrets を直した後の再実行や、初回の疎通確認のために手でも回せるようにする。
   workflow_dispatch:
+    inputs:
+      submit:
+        description: "審査に出すところまでやる"
+        type: boolean
+        default: true
 
 # アップロードを途中で打ち切ると App Store Connect に処理中のビルドが残るため、
 # 後続を待たせる（cancel はしない）。
@@ -22,9 +30,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  ASC_BUNDLE_ID: io.github.iam74k4.AppMixer
+
 jobs:
   upload:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.pkg.outputs.build }}
+      release: ${{ steps.version.outputs.release }}
 
     steps:
       - uses: actions/checkout@v5
@@ -78,6 +93,7 @@ jobs:
           rm -f "$RUNNER_TEMP"/dist.p12 "$RUNNER_TEMP"/installer.p12
 
       - name: 提出用 .pkg を作る
+        id: pkg
         if: steps.version.outputs.release == 'true'
         env:
           MAS_IDENTITY: ${{ secrets.MAS_IDENTITY }}
@@ -89,6 +105,11 @@ jobs:
             MAS_IDENTITY="$MAS_IDENTITY" \
             MAS_INSTALLER_IDENTITY="$MAS_INSTALLER_IDENTITY" \
             PROVISION_PROFILE=AppMixer.provisionprofile
+          # ビルド番号は Makefile が導出する。同じ式を書き写すと片方だけずれるので、
+          # できあがった .app から読み取って後続へ渡す。
+          BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" dist/mas/AppMixer.app/Contents/Info.plist)
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "ビルド番号: $BUILD"
 
       - name: App Store Connect へアップロード
         if: steps.version.outputs.release == 'true'
@@ -109,10 +130,64 @@ jobs:
             --apiKey "$ASC_API_KEY_ID" \
             --apiIssuer "$ASC_API_ISSUER_ID"
 
-          echo "アップロード完了。App Store Connect で処理が終わるのを待ってから審査に提出する。"
+          echo "アップロード完了。"
 
       - name: 後片付け（鍵を残さない）
         if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
           rm -rf ~/.appstoreconnect/private_keys AppMixer.provisionprofile
+
+  # ビルドの処理待ちは 10 分から 1 時間かかる。macOS ランナーは課金の倍率が
+  # 高いので、Xcode の要らないここは Linux で待つ。
+  submit:
+    needs: upload
+    if: >-
+      needs.upload.outputs.release == 'true'
+      && vars.ASC_AUTO_SUBMIT != 'false'
+      && (github.event_name != 'workflow_dispatch' || inputs.submit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依存を入れる
+        run: pip install --quiet "pyjwt[crypto]"
+
+      - name: ビルドの処理が終わるのを待つ
+        id: build
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          BUILD_ID=$(python3 scripts/asc.py wait-build \
+            --version "${{ needs.upload.outputs.version }}" \
+            --build "${{ needs.upload.outputs.build }}")
+          echo "id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+
+      - name: リリースノートを CHANGELOG から取り出す
+        run: |
+          ./scripts/changelog-section.sh "${{ needs.upload.outputs.version }}" > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "warning: CHANGELOG.md に [${{ needs.upload.outputs.version }}] の節がありません。"
+          fi
+          cat /tmp/notes.md
+
+      - name: バージョンを用意して審査に出す
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          python3 scripts/asc.py submit \
+            --version "${{ needs.upload.outputs.version }}" \
+            --build-id "${{ steps.build.outputs.id }}" \
+            --notes-file /tmp/notes.md \
+            --release-type "${{ vars.ASC_RELEASE_TYPE || 'AFTER_APPROVAL' }}"
+          echo "審査に出しました。通れば自動で配信され、tag-release がタグを打ちます。"
