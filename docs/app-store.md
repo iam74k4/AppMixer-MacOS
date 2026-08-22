@@ -154,6 +154,9 @@ App Store はビルド番号が**前回より大きい**ことを求めます。
 
 ### 提出物を作る
 
+`develop` を `main` へマージすると、CI が以下と同じものを作って App Store Connect へ
+アップロードします（`docs/release-flow.md`）。手元で作る場合:
+
 ```bash
 make clean
 make mas \
@@ -186,13 +189,9 @@ App Privacy（プライバシー情報）は「データを収集しません」
 配信が始まってから印を付けます。先にタグを打つと、リジェクトされた場合に
 「タグはあるのに世に出ていない」版が残ります。
 
-```bash
-git checkout main
-git merge --no-ff develop
-git push origin main
-git tag -a v0.1.0 -m "AppMixer v0.1.0"
-git push origin v0.1.0
-```
+GitHub の Actions タブ → **tag-release** → Run workflow を実行すると、`main` の
+現在のバージョンでタグ `v<version>` と GitHub Release が作られます
+（`docs/release-flow.md`）。
 
 ---
 
