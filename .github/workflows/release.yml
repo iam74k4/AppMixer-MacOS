@@ -1,0 +1,118 @@
+name: release
+
+# main へのマージで、App Store 提出用の .pkg を作って App Store Connect へ
+# 自動アップロードする。審査への提出とタグ打ちはここではやらない
+# （docs/app-store.md の方針どおり、配信が始まってから tag-release.yml で印を付ける）。
+#
+# 必要な Secrets は docs/release-flow.md にまとめてある。未設定のまま main へ
+# マージすると署名の段階で落ちる（プロダクトには影響しない）。
+
+on:
+  push:
+    branches: [main]
+  # Secrets を直した後の再実行や、初回の疎通確認のために手でも回せるようにする。
+  workflow_dispatch:
+
+# アップロードを途中で打ち切ると App Store Connect に処理中のビルドが残るため、
+# 後続を待たせる（cancel はしない）。
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 「この版はもう出したか」をタグの有無で判定するため、履歴とタグが全部要る。
+          fetch-depth: 0
+
+      - name: 出す版かどうかを判定
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" bundle/Info.plist)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            # タグがある = 配信済みの版。バージョンを上げずに main へマージした
+            # （ドキュメント修正など）だけなので、アップロードしない。
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION は配信済み（タグあり）。アップロードをスキップします。"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "v$VERSION をアップロードします。"
+          fi
+
+      - name: 署名の準備（証明書とプロファイルを取り込む）
+        if: steps.version.outputs.release == 'true'
+        env:
+          MAS_CERT_P12: ${{ secrets.MAS_CERT_P12 }}
+          MAS_INSTALLER_CERT_P12: ${{ secrets.MAS_INSTALLER_CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
+          PROVISION_PROFILE_B64: ${{ secrets.PROVISION_PROFILE_B64 }}
+        run: |
+          # ランナーのログインキーチェーンを汚さないよう、使い捨てのキーチェーンに入れる。
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PW=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN_PATH"
+
+          echo "$MAS_CERT_P12"           | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          echo "$MAS_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/installer.p12"
+          for p12 in dist installer; do
+            security import "$RUNNER_TEMP/$p12.p12" -k "$KEYCHAIN_PATH" \
+              -P "$CERT_P12_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productbuild
+          done
+          # これが無いと codesign が鍵に触るたびに GUI の許可を待って止まる。
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PW" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          echo "$PROVISION_PROFILE_B64" | base64 --decode > AppMixer.provisionprofile
+          rm -f "$RUNNER_TEMP"/dist.p12 "$RUNNER_TEMP"/installer.p12
+
+      - name: 提出用 .pkg を作る
+        if: steps.version.outputs.release == 'true'
+        env:
+          MAS_IDENTITY: ${{ secrets.MAS_IDENTITY }}
+          MAS_INSTALLER_IDENTITY: ${{ secrets.MAS_INSTALLER_IDENTITY }}
+        run: |
+          swift --version
+          echo "SDK: $(xcrun --show-sdk-version)"
+          make mas \
+            MAS_IDENTITY="$MAS_IDENTITY" \
+            MAS_INSTALLER_IDENTITY="$MAS_INSTALLER_IDENTITY" \
+            PROVISION_PROFILE=AppMixer.provisionprofile
+
+      - name: App Store Connect へアップロード
+        if: steps.version.outputs.release == 'true'
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # altool は API キーをこの決まった場所から探す。
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$ASC_API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_"$ASC_API_KEY_ID".p8
+
+          # altool が使えなくなったときの代替は docs/release-flow.md 参照。
+          xcrun altool --upload-app \
+            -f "dist/AppMixer-$VERSION.pkg" \
+            --type macos \
+            --apiKey "$ASC_API_KEY_ID" \
+            --apiIssuer "$ASC_API_ISSUER_ID"
+
+          echo "アップロード完了。App Store Connect で処理が終わるのを待ってから審査に提出する。"
+
+      - name: 後片付け（鍵を残さない）
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -rf ~/.appstoreconnect/private_keys AppMixer.provisionprofile

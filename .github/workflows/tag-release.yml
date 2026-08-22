@@ -1,0 +1,54 @@
+name: tag-release
+
+# 審査を通って配信が始まったあとに、リリースの印を付ける手動ワークフロー。
+# main の現在のバージョンでタグを打ち、CHANGELOG の該当節を本文にした
+# GitHub Release を作る。
+#
+# 先にタグを打たないのは docs/app-store.md の方針どおり。リジェクトされた場合に
+# 「タグはあるのに世に出ていない」版を残さないため、配信開始を人が確認してから
+# Actions タブ → tag-release → Run workflow で実行する。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: タグと GitHub Release を作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # ubuntu には PlistBuddy が無いので、キーの次行の <string> を読む。
+          VERSION=$(grep -A1 '<key>CFBundleShortVersionString</key>' bundle/Info.plist \
+                    | sed -n 's:.*<string>\(.*\)</string>.*:\1:p')
+          TAG="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "error: $TAG は既にあります。bundle/Info.plist のバージョンを確認してください。"
+            exit 1
+          fi
+
+          # CHANGELOG から「## [X.Y.Z]」の節だけを抜き出してリリースノートにする。
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
+            /^## \[/ { flag = 0 }
+            flag' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "warning: CHANGELOG.md に [$VERSION] の節が見つかりません。ノート無しで作ります。"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "AppMixer $TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "AppMixer $TAG" --notes-file /tmp/notes.md
+          echo "作成: $TAG"
