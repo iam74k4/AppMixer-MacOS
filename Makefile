@@ -144,6 +144,12 @@ mas: check-mas bundle
 	@mkdir -p "$(DIST)/mas"
 	@cp -R "$(APP)" "$(MAS_APP)"
 	@cp "$(PROVISION_PROFILE)" "$(MAS_APP)/Contents/embedded.provisionprofile"
+	@# ブラウザでダウンロードしたファイルには com.apple.quarantine が付く。
+	@# 残したまま .pkg にすると ITMS-91109 でアップロードが弾かれるため、ここで剥がす。
+	@xattr -cr "$(MAS_APP)"
+	@# コピー元の権限が厳しすぎると、そのまま持ち込まれて 90255（root専用ファイル）で
+	@# 弾かれる。アプリ内のファイルは全ユーザー可読が必須のため、ここで正規化する。
+	@chmod 644 "$(MAS_APP)/Contents/embedded.provisionprofile"
 	@# App Store の署名には application-identifier と team-identifier が要る。
 	@# 無いまま提出すると、アップロードの検証で弾かれる。ここで足す。
 	@cp bundle/$(APP_NAME).mas.entitlements "$(MAS_ENTITLEMENTS)"
