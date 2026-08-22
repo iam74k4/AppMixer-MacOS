@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>AppMixer</string>
+    <key>CFBundleDisplayName</key>
+    <string>AppMixer</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.iam74k4.AppMixer</string>
+    <key>CFBundleExecutable</key>
+    <string>AppMixer</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <!-- ビルド時に Makefile が CFBundleShortVersionString から導いて上書きする
+         （0.1.0 -> 100）。ここの値は手で編集しなくてよい。 -->
+    <key>CFBundleVersion</key>
+    <string>100</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <!-- App Store の提出に必須。 -->
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 iam74k4. All Rights Reserved.</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+    <!-- 暗号化は使っていない。書いておくと、提出のたびに輸出コンプライアンスの
+         質問に答えなくて済む。 -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>AppMixer はアプリごとの音量を調整するために各アプリの音声を取得し、音量を変えて出力し直します。音声の録音・保存・送信は行いません。</string>
+</dict>
+</plist>

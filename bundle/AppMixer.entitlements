@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      開発用（make run）。エンタイトルメントは要らない。
+
+      「システム音声録音」の許可は TCC で与えられるもので、エンタイトルメントでは
+      ゲートされない。マイクの権限（device.audio-input）は使っていないため要求
+      しない。要求すると、署名を見た人にマイクを使うアプリだと誤解される。
+
+      提出用は bundle/AppMixer.mas.entitlements（App Sandbox 付き）を使う。
+    -->
+</dict>
+</plist>

@@ -1,0 +1,22 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Build artifacts
+dist/
+*.app
+DerivedData/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+
+# アイコンのビルド生成物（iconutil で生成）
+bundle/icon/AppIcon.icns
+
+# App Store 提出用のプロビジョニングプロファイル。
+*.provisionprofile
