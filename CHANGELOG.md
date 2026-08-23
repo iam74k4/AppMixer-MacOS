@@ -5,9 +5,9 @@
 
 ## [未リリース]
 
-## [0.1.0] - 2026-08-05
+## [1.0] - 未リリース
 
-最初のリリース。
+最初のリリース。Mac App Store への提出準備中です。
 
 ### 追加
 - アプリごとの音量とミュート
@@ -23,5 +23,4 @@
 - 設定を反映できなかったとき、その行に印を出す
   （出力先の切り替えに追従できず音が止まった場合は復旧を試み続ける）
 
-[未リリース]: https://github.com/iam74k4/AppMixer-MacOS/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/iam74k4/AppMixer-MacOS/releases/tag/v0.1.0
+[未リリース]: https://github.com/iam74k4/AppMixer-MacOS/compare/main...HEAD

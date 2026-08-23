@@ -73,13 +73,13 @@ make run-sandboxed IDENTITY="AppMixer Dev"
 操作したあとに実行します。
 
 ```bash
-log show --last 3m --predicate 'subsystem == "io.github.iam74k4.AppMixer"' --style compact
+log show --last 3m --predicate 'subsystem == "com.iam74k4.AppMixer"' --style compact
 ```
 
 サンドボックス下で起動したかは、コンテナの有無が確実です。
 
 ```bash
-ls -ld ~/Library/Containers/io.github.iam74k4.AppMixer
+ls -ld ~/Library/Containers/com.iam74k4.AppMixer
 ```
 
 サンドボックス版は `UserDefaults` もコンテナの中を読むため、**保存した音量が空に見え、
@@ -134,7 +134,7 @@ App Store では購入の判定を OS が行うため、独自のライセンス
 
 | | どこで |
 |---|---|
-| App ID | Certificates, Identifiers & Profiles。`io.github.iam74k4.AppMixer` |
+| App ID | Certificates, Identifiers & Profiles。`com.iam74k4.AppMixer` |
 | **Apple Distribution** 証明書 | アプリの署名用 |
 | **3rd Party Mac Developer Installer** 証明書 | pkg の署名用 |
 | プロビジョニングプロファイル（Mac App Store 用） | App ID に紐づけて作成し、ダウンロード |

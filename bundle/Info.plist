@@ -7,17 +7,17 @@
     <key>CFBundleDisplayName</key>
     <string>AppMixer</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.iam74k4.AppMixer</string>
+    <string>com.iam74k4.AppMixer</string>
     <key>CFBundleExecutable</key>
     <string>AppMixer</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>1.0</string>
     <!-- ビルド時に Makefile が CFBundleShortVersionString から導いて上書きする
-         （0.1.0 -> 100）。ここの値は手で編集しなくてよい。 -->
+         （1.0 -> 10000）。ここの値は手で編集しなくてよい。 -->
     <key>CFBundleVersion</key>
-    <string>100</string>
+    <string>10000</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <!-- App Store の提出に必須。 -->
