@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 env:
-  ASC_BUNDLE_ID: io.github.iam74k4.AppMixer
+  ASC_BUNDLE_ID: com.iam74k4.AppMixer
 
 jobs:
   upload:
