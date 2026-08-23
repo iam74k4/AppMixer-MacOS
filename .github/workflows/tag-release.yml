@@ -37,6 +37,13 @@ env:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    # 配信状況の確認に release.yml と同じ API キーを使う。
+    #
+    # 注意: この Environment に「Required reviewers」を付けると、3 時間おきの
+    # cron が毎回この承認待ちで止まる（多くは何もせず終わる実行なので、承認の
+    # 通知だけが溜まる）。鍵の保護は Required reviewers ではなく、配備ブランチを
+    # main に限る設定で行う。
+    environment: release
 
     steps:
       - uses: actions/checkout@v5

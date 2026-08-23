@@ -36,6 +36,11 @@ env:
 jobs:
   upload:
     runs-on: macos-latest
+    # 署名証明書と App Store Connect の API キーは Environment（release）の
+    # Secrets に置く。リポジトリ Secrets だと、どのブランチのどのワークフローからも
+    # 読めてしまう。Environment 側で配備ブランチを main に限れば、提出に使える鍵は
+    # main を通ったコードからしか触れない。
+    environment: release
     outputs:
       version: ${{ steps.version.outputs.version }}
       build: ${{ steps.pkg.outputs.build }}
@@ -147,6 +152,8 @@ jobs:
       && vars.ASC_AUTO_SUBMIT != 'false'
       && (github.event_name != 'workflow_dispatch' || inputs.submit)
     runs-on: ubuntu-latest
+    # upload と同じ API キーを使う。
+    environment: release
     timeout-minutes: 90
 
     steps:
