@@ -1,6 +1,6 @@
 name: build
 
-# ビルドが通ることだけを見る最小の CI。
+# ビルドが通ることだけを見る CI。
 # これが無いと、コンパイルすら確認されていない変更が develop に入りうる。
 
 on:
@@ -9,10 +9,14 @@ on:
   pull_request:
     branches: [main, develop]
 
-# 同じブランチへ続けて push したときは、最新のものだけ走らせる。
+# PR は最新の push だけ見れば足りるので打ち切る。
+# main / develop は各コミットの結果を残したいので打ち切らない。
+# 一括で cancel-in-progress: true にすると、続けてマージしたときに
+# 先のマージコミットの build が後続に殺され、統合ブランチに
+# 「ビルドが通るか確認されていないコミット」が残る。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -21,7 +25,11 @@ jobs:
   build:
     # Core Audio / AppKit / SwiftUI / ServiceManagement に依存するため
     # macOS ランナーが要る。Linux では import すら解決できない。
-    runs-on: macos-latest
+    #
+    # macos-latest は Xcode ごと移動する。上がった日に新しい警告や
+    # 並行性チェックの厳格化で突然赤くなるため、明示的に固定して、
+    # 上げるときは意図的な PR で上げる。
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v5
@@ -38,3 +46,28 @@ jobs:
       # という原因の分かりにくい形で落ちるため）。
       - name: ビルド
         run: make build
+
+      # 提出物の組み立て経路をマージ前に一度通す。既定の ad-hoc 署名
+      # （IDENTITY=-）なので証明書は要らないが、Info.plist の欠落、
+      # PlistBuddy の失敗、iconset の欠け、iconutil の失敗はここで落とせる。
+      # 証明書が要るのは make mas から先だけ。
+      - name: バンドルと署名まで通す
+        run: make sign
+
+      # bundle/Info.plist と CHANGELOG.md が食い違ったまま提出に進むと、
+      # App Store のリリースノートが別バージョンのものになる。
+      # リリースノートは CHANGELOG の節をそのまま使うため、ここでずれを止める。
+      - name: バージョンの整合を確認
+        run: |
+          plist=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" bundle/Info.plist)
+          latest=$(grep -m1 -o '^## \[[0-9][^]]*\]' CHANGELOG.md | sed 's/^## \[//; s/\]$//')
+          echo "Info.plist: $plist"
+          echo "CHANGELOG:  $latest"
+          if [ -z "$latest" ]; then
+            echo "error: CHANGELOG.md にバージョン見出し（## [X.Y.Z]）がありません。"
+            exit 1
+          fi
+          if [ "$plist" != "$latest" ]; then
+            echo "error: バージョンが食い違っています。どちらかを合わせてください。"
+            exit 1
+          fi
