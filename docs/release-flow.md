@@ -179,8 +179,9 @@ GitHub Release の本文の両方がこれを使う。二か所で別々に書�
 
 ### cron の注意
 
-`tag-release.yml` の `schedule` は、**このリポジトリの既定ブランチ（`develop`）に
-あるファイル**で動く。ワークフローを直したら、develop に入るまで反映されない。
+`tag-release.yml` の `schedule` は、**このリポジトリの既定ブランチ（`main`）に
+あるファイル**で動く。ワークフローを直したら、main に入るまで反映されない。
+develop へマージしただけでは、次のリリースで main に入るまで古い定義のまま動く。
 
 また GitHub は、60 日間まったく動きの無いリポジトリで scheduled workflow を
 自動的に止める。長く触っていない状態でリリースしたときは、Actions タブで

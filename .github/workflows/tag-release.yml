@@ -9,8 +9,9 @@ name: tag-release
 # 先にタグを打たないのは docs/app-store.md の方針どおり。リジェクトされた場合に
 # 「タグはあるのに世に出ていない」版を残さないため。
 #
-# 注意: cron はこのリポジトリの既定ブランチ（develop）にあるファイルで動く。
-# このワークフローを直したら develop に入るまで反映されない。
+# 注意: cron はこのリポジトリの既定ブランチ（main）にあるファイルで動く。
+# このワークフローを直したら main に入るまで反映されない（develop へマージ
+# しただけでは、次のリリースで main に入るまで古い定義のまま動く）。
 
 on:
   schedule:
@@ -48,7 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # 見るのは常に main の中身。cron は develop から起動されるため明示する。
+          # 見るのは常に main の中身。手動実行を別のブランチから掛けても
+          # 判定がぶれないよう明示する。
           ref: main
           fetch-depth: 0
 
