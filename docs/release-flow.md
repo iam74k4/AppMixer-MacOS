@@ -78,9 +78,20 @@ App Store Connect → **ユーザとアクセス** → **統合**（Integrations
 - 作成すると **Issuer ID** と **キー ID** が表示され、**.p8 ファイルは一度しか
   ダウンロードできない**。安全な場所に保管する
 
-### 3. GitHub Secrets に入れる
+### 3. Environment（`release`）の Secrets に入れる
 
-リポジトリの Settings → Secrets and variables → Actions → New repository secret。
+リポジトリ Secrets ではなく **Environment Secrets** に置く。App Store へ提出できる
+鍵なので、読める範囲を main を通ったコードだけに絞るため。
+
+1. Settings → **Environments** → New environment → 名前は `release`
+2. **Deployment branches and tags** を `Selected branches and tags` にし、`main`
+   だけを許可する。これで他のブランチからは鍵が解決されず、workflow_dispatch でも
+   走らせられない
+3. **Environment secrets** → Add secret で下の表を登録する
+
+**Required reviewers は付けないこと。** `tag-release.yml` は 3 時間おきの cron で
+動き、その大半は「タグが既にある」で即座に終わる。承認を必須にすると、その
+すべてが承認待ちで止まる。
 
 | Secret 名 | 中身 |
 |---|---|
@@ -103,7 +114,13 @@ base64 -i AppMixer.provisionprofile | pbcopy
 
 ### 4. 振る舞いを変えたいとき（Variables、任意）
 
-同じ画面の **Variables** タブで設定する。既定のままでよければ何もしなくてよい。
+こちらは秘密ではないので、**リポジトリの** Variables に置く
+（Settings → Secrets and variables → Actions → Variables タブ）。既定のままで
+よければ何もしなくてよい。
+
+`ASC_AUTO_SUBMIT` は submit ジョブの job-level `if` で読んでおり、そこは
+Environment が解決される前に評価される。Environment 側に置くと効かないため、
+リポジトリ Variables のままにしておく。
 
 | 変数名 | 既定 | 効果 |
 |---|---|---|
