@@ -36,3 +36,4 @@ chore: set up develop branch and git conventions
 - `docs/feasibility-study.md` — 基礎検討（技術フィージビリティ）
 - `docs/approach-comparison.md` — 実現方式の詳細比較（方式A vs 方式B）
 - `docs/app-store.md` — Mac App Store での配布とリリース手順
+- `docs/release-flow.md` — リリースフロー（main マージで App Store Connect へ自動アップロード）
