@@ -1,0 +1,18 @@
+version: 2
+
+# GitHub Actions のバージョン更新だけを見る。SwiftPM の依存は今のところ無い。
+#
+# checkout@v4 の Node 20 非推奨警告を手で見つけて v5 に直した経緯（9accef2 →
+# 1257252）があり、そこは自動化できる。
+#
+# PR の宛先は develop。既定のままだと main へ直接 PR が立ち、
+# develop を経由するブランチ運用と食い違う。
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "develop"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
