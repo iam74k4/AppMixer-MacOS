@@ -47,7 +47,7 @@ jobs:
     environment: release
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # 見るのは常に main の中身。手動実行を別のブランチから掛けても
           # 判定がぶれないよう明示する。
