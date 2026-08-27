@@ -5,9 +5,14 @@
 
 ## [未リリース]
 
-## [1.0] - 未リリース
+## [1.0.1] - 未リリース
 
-最初のリリース。Mac App Store への提出準備中です。
+### 変更
+- アプリアイコンを黒・白の配色に改め、つまみと出ている音量ぶんだけをシステムブルーで塗る
+
+## [1.0] - 2026-08-24
+
+最初のリリース。
 
 ### 追加
 - アプリごとの音量とミュート
@@ -24,3 +29,5 @@
   （出力先の切り替えに追従できず音が止まった場合は復旧を試み続ける）
 
 [未リリース]: https://github.com/iam74k4/AppMixer-MacOS/compare/main...HEAD
+[1.0.1]: https://github.com/iam74k4/AppMixer-MacOS/compare/v1.0...HEAD
+[1.0]: https://github.com/iam74k4/AppMixer-MacOS/releases/tag/v1.0
