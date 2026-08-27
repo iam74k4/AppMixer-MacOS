@@ -34,7 +34,8 @@ BASE = "https://api.appstoreconnect.apple.com"
 PLATFORM = "MAC_OS"
 
 # 配信が始まった状態。ここに来たらタグを打ってよい。
-LIVE_STATES = {"READY_FOR_SALE"}
+# appVersionState では READY_FOR_DISTRIBUTION、旧 appStoreState では READY_FOR_SALE。
+LIVE_STATES = {"READY_FOR_SALE", "READY_FOR_DISTRIBUTION"}
 # 人が App Store Connect で操作しないと先に進まない状態。待っても変わらない。
 STUCK_STATES = {
     "DEVELOPER_REJECTED",
