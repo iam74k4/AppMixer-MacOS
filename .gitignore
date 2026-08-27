@@ -15,6 +15,10 @@ DerivedData/
 # macOS
 .DS_Store
 
+# Python（scripts/asc.py のバイトコード）
+__pycache__/
+*.pyc
+
 # アイコンのビルド生成物（iconutil で生成）
 bundle/icon/AppIcon.icns
 
