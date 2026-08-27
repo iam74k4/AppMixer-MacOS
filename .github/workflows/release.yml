@@ -47,7 +47,7 @@ jobs:
       release: ${{ steps.version.outputs.release }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # 「この版はもう出したか」をタグの有無で判定するため、履歴とタグが全部要る。
           fetch-depth: 0
@@ -157,7 +157,7 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
