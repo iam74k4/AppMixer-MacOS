@@ -4,9 +4,16 @@
 SVG を描いてから、.icns に必要なサイズの PNG を AppIcon.iconset/ へ書き出す。
 .icns への変換は macOS の iconutil が要るので Makefile 側で行う。
 
-    python3 make_icon.py     # icon.svg と AppIcon.iconset/*.png を生成
+    python3 make_icon.py                  # 既定（暗背景）で生成
+    python3 make_icon.py --variant light  # 明背景で生成
+
+明背景／暗背景の 2 種を icon-dark.svg / icon-light.svg として常に書き出し、
+実際に .icns へ焼くほう（--variant）を icon.svg と AppIcon.iconset/ に出す。
+macOS 14 の .icns は外観（ライト／ダーク）で絵を切り替えられないため、
+同梱できるのはどちらか一方だけ。
 """
 
+import argparse
 import pathlib
 import subprocess
 import sys
@@ -22,18 +29,30 @@ BODY = S - MARGIN * 2
 # ミキサーらしさを 3 本のフェーダーで表す。値は上から見た位置（0=下, 1=上）。
 FADERS = [0.72, 0.38, 0.58]
 
-# 黒・白のみで構成する。Dock のライト／ダークどちらでも沈まないよう、
-# 背景はごくわずかに明暗をつけ、フェーダーは白の不透明度で階調を作る。
-BG_TOP = "#3A3A3C"
-BG_BOTTOM = "#0B0B0D"
-TRACK = "#FFFFFF"
-KNOB = "#FFFFFF"
-LEVEL = "#FFFFFF"
-TRACK_OPACITY = 0.16
-LEVEL_OPACITY = 0.42
+# 背景とトラックは無彩色に保ち、操作点（つまみ）と出ている音量（レベル）だけを
+# システムのアクセントカラーで塗る。色数を増やさずに「触るところ」を際立たせる。
+#
+# hairline は明背景版だけで使う。白い Finder の上に置くと輪郭が消えるため、
+# ごく薄い縁を足して形が分かるようにする。暗背景版は落ち影だけで足りる。
+PALETTES = {
+    "dark": dict(
+        bg_top="#3A3A3C", bg_bottom="#0B0B0D",
+        track="#FFFFFF", track_opacity=0.16,
+        accent="#0A84FF",              # ダーク外観のシステムブルー
+        level_opacity=0.55,
+        hairline=None,
+    ),
+    "light": dict(
+        bg_top="#FFFFFF", bg_bottom="#E6E6EB",
+        track="#000000", track_opacity=0.14,
+        accent="#007AFF",              # ライト外観のシステムブルー
+        level_opacity=0.55,
+        hairline="#000000",
+    ),
+}
 
 
-def svg() -> str:
+def svg(bg_top, bg_bottom, track, track_opacity, accent, level_opacity, hairline) -> str:
     x0 = MARGIN
     y0 = MARGIN
     # 16px まで縮めるとトラックが 1px を割るため、実寸より太めに取る。
@@ -49,8 +68,8 @@ def svg() -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{S}" height="{S}" viewBox="0 0 {S} {S}">',
         '<defs>',
         '  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">',
-        f'    <stop offset="0" stop-color="{BG_TOP}"/>',
-        f'    <stop offset="1" stop-color="{BG_BOTTOM}"/>',
+        f'    <stop offset="0" stop-color="{bg_top}"/>',
+        f'    <stop offset="1" stop-color="{bg_bottom}"/>',
         '  </linearGradient>',
         '  <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">',
         '    <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000000" flood-opacity="0.38"/>',
@@ -60,23 +79,30 @@ def svg() -> str:
         f'fill="url(#bg)" filter="url(#shadow)"/>',
     ]
 
+    if hairline:
+        parts.append(
+            f'<rect x="{x0 + 2}" y="{y0 + 2}" width="{BODY - 4}" height="{BODY - 4}" rx="{R - 2}" '
+            f'fill="none" stroke="{hairline}" stroke-width="4" stroke-opacity="0.10"/>'
+        )
+
     for i, value in enumerate(FADERS):
         cx = x0 + gap * (i + 0.5)
         # トラック
         parts.append(
             f'<rect x="{cx - track_w / 2}" y="{inner_top}" width="{track_w}" height="{span}" '
-            f'rx="{track_w / 2}" fill="{TRACK}" opacity="{TRACK_OPACITY}"/>'
+            f'rx="{track_w / 2}" fill="{track}" opacity="{track_opacity}"/>'
         )
         knob_cy = inner_bot - span * value
-        # つまみより下＝出ている音量ぶんを明るく塗る
+        # つまみより下＝出ている音量ぶん
         parts.append(
             f'<rect x="{cx - track_w / 2}" y="{knob_cy}" width="{track_w}" '
-            f'height="{inner_bot - knob_cy}" rx="{track_w / 2}" fill="{LEVEL}" opacity="{LEVEL_OPACITY}"/>'
+            f'height="{inner_bot - knob_cy}" rx="{track_w / 2}" fill="{accent}" '
+            f'opacity="{level_opacity}"/>'
         )
         # つまみ
         parts.append(
             f'<rect x="{cx - knob_w / 2}" y="{knob_cy - knob_h / 2}" width="{knob_w}" '
-            f'height="{knob_h}" rx="{knob_h / 2}" fill="{KNOB}"/>'
+            f'height="{knob_h}" rx="{knob_h / 2}" fill="{accent}"/>'
         )
 
     parts.append('</svg>')
@@ -94,9 +120,18 @@ SIZES = [
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--variant", choices=sorted(PALETTES), default="dark",
+                    help=".icns に焼くほうの配色（既定: dark）")
+    args = ap.parse_args()
+
+    for name, palette in PALETTES.items():
+        (HERE / f"icon-{name}.svg").write_text(svg(**palette), encoding="utf-8")
+        print(f"wrote icon-{name}.svg")
+
     source = HERE / "icon.svg"
-    source.write_text(svg(), encoding="utf-8")
-    print(f"wrote {source.name}")
+    source.write_text(svg(**PALETTES[args.variant]), encoding="utf-8")
+    print(f"wrote {source.name} ({args.variant})")
 
     out = HERE / "AppIcon.iconset"
     out.mkdir(exist_ok=True)
